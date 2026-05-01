@@ -137,11 +137,183 @@ public struct VoiceAgentSessionSnapshot: Equatable, Sendable {
     }
 }
 
+public struct VoiceAgentMemorySnapshot: Equatable, Sendable {
+    public var facts: [String: String]
+    public var notes: [String]
+
+    public var rendered: String {
+        var lines: [String] = []
+        if !facts.isEmpty {
+            lines.append("Facts:")
+            for key in facts.keys.sorted() {
+                lines.append("- \(key): \(facts[key] ?? "")")
+            }
+        }
+        if !notes.isEmpty {
+            lines.append("Notes:")
+            for note in notes {
+                lines.append("- \(note)")
+            }
+        }
+        return lines.isEmpty ? "No memory yet." : lines.joined(separator: "\n")
+    }
+}
+
+public actor VoiceAgentMemory {
+    private var facts: [String: String]
+    private var notes: [String]
+
+    public init(facts: [String: String] = [:], notes: [String] = []) {
+        self.facts = facts
+        self.notes = notes
+    }
+
+    public func setFact(_ key: String, value: String) {
+        facts[key] = value
+    }
+
+    public func fact(_ key: String) -> String? {
+        facts[key]
+    }
+
+    public func remember(_ note: String) {
+        notes.append(note)
+    }
+
+    public func snapshot() -> VoiceAgentMemorySnapshot {
+        VoiceAgentMemorySnapshot(facts: facts, notes: notes)
+    }
+
+    public func reset() {
+        facts = [:]
+        notes = []
+    }
+}
+
+public struct VoiceAgentToolContext: Sendable {
+    public var sessionID: UUID
+    public var agentName: String
+    public var memory: VoiceAgentMemorySnapshot
+
+    public init(sessionID: UUID, agentName: String, memory: VoiceAgentMemorySnapshot) {
+        self.sessionID = sessionID
+        self.agentName = agentName
+        self.memory = memory
+    }
+}
+
+public struct VoiceAgentToolInvocation: Equatable, Sendable {
+    public var name: String
+    public var input: String
+
+    public init(name: String, input: String) {
+        self.name = name
+        self.input = input
+    }
+}
+
+public struct VoiceAgentToolResult: Equatable, Sendable {
+    public var name: String
+    public var input: String
+    public var output: String
+
+    public init(name: String, input: String, output: String) {
+        self.name = name
+        self.input = input
+        self.output = output
+    }
+}
+
+public protocol VoiceAgentTool: Sendable {
+    var name: String { get }
+    var description: String { get }
+
+    func call(input: String, context: VoiceAgentToolContext) async throws -> String
+}
+
+public struct VoiceSubAgentAssignment: Equatable, Sendable {
+    public var agentName: String
+    public var task: String
+    public var context: String?
+    public var toolInvocations: [VoiceAgentToolInvocation]
+
+    public init(
+        agentName: String,
+        task: String,
+        context: String? = nil,
+        toolInvocations: [VoiceAgentToolInvocation] = []
+    ) {
+        self.agentName = agentName
+        self.task = task
+        self.context = context
+        self.toolInvocations = toolInvocations
+    }
+}
+
+public enum VoiceSubAgentEventPhase: String, Equatable, Sendable {
+    case started
+    case toolStarted
+    case toolFinished
+    case completed
+    case failed
+}
+
+public struct VoiceSubAgentEvent: Equatable, Sendable {
+    public var runID: UUID
+    public var agentName: String
+    public var task: String
+    public var phase: VoiceSubAgentEventPhase
+    public var toolName: String?
+    public var message: String?
+    public var timestamp: Date
+
+    public init(
+        runID: UUID,
+        agentName: String,
+        task: String,
+        phase: VoiceSubAgentEventPhase,
+        toolName: String? = nil,
+        message: String? = nil,
+        timestamp: Date = Date()
+    ) {
+        self.runID = runID
+        self.agentName = agentName
+        self.task = task
+        self.phase = phase
+        self.toolName = toolName
+        self.message = message
+        self.timestamp = timestamp
+    }
+}
+
+public typealias VoiceSubAgentEventHandler = @Sendable (VoiceSubAgentEvent) async -> Void
+
+public struct VoiceSubAgentResult: Equatable, Sendable {
+    public var runID: UUID
+    public var agentName: String
+    public var task: String
+    public var output: String
+    public var toolResults: [VoiceAgentToolResult]
+    public var memory: VoiceAgentMemorySnapshot
+    public var session: VoiceAgentSessionSnapshot
+    public var startedAt: Date
+    public var completedAt: Date
+}
+
+public struct VoiceAgentOrchestrationResult: Equatable, Sendable {
+    public var input: String
+    public var finalOutput: String
+    public var subAgentResults: [VoiceSubAgentResult]
+    public var supervisorSession: VoiceAgentSessionSnapshot
+}
+
 public enum VoiceAgentError: Error, LocalizedError, Equatable {
     case missingAPIKey
     case invalidEndpoint(URL)
     case emptyResponse
     case badStatusCode(Int, String)
+    case unknownSubAgent(String)
+    case unknownTool(agentName: String, toolName: String)
 
     public var errorDescription: String? {
         switch self {
@@ -153,6 +325,10 @@ public enum VoiceAgentError: Error, LocalizedError, Equatable {
             "The model returned no assistant message."
         case let .badStatusCode(code, body):
             "OpenAI-compatible endpoint returned HTTP \(code): \(body)"
+        case let .unknownSubAgent(name):
+            "Unknown subagent: \(name)"
+        case let .unknownTool(agentName, toolName):
+            "Unknown tool '\(toolName)' for subagent '\(agentName)'."
         }
     }
 }
@@ -335,5 +511,322 @@ public extension VoiceAgent {
             options: options,
             client: OpenAICompatibleChatClient.hardcodedOpenAI()
         )
+    }
+}
+
+public actor VoiceSubAgent {
+    public let name: String
+    public let purpose: String
+
+    private let agent: VoiceAgent
+    private let memory: VoiceAgentMemory
+    private let tools: [String: any VoiceAgentTool]
+    private let eventHandler: VoiceSubAgentEventHandler?
+
+    public init(
+        name: String,
+        purpose: String,
+        model: String,
+        systemPrompt: String,
+        options: VoiceAgentOptions = VoiceAgentOptions(),
+        client: any VoiceAgentLLMClient,
+        memory: VoiceAgentMemory = VoiceAgentMemory(),
+        tools: [any VoiceAgentTool] = [],
+        eventHandler: VoiceSubAgentEventHandler? = nil
+    ) {
+        self.name = name
+        self.purpose = purpose
+        self.agent = VoiceAgent(
+            model: model,
+            systemPrompt: systemPrompt,
+            options: options,
+            client: client
+        )
+        self.memory = memory
+        self.tools = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0) })
+        self.eventHandler = eventHandler
+    }
+
+    public func run(_ assignment: VoiceSubAgentAssignment) async throws -> VoiceSubAgentResult {
+        let runID = UUID()
+        let startedAt = Date()
+        await emit(
+            runID: runID,
+            task: assignment.task,
+            phase: .started,
+            message: "Subagent \(name) started."
+        )
+
+        do {
+            let toolResults = try await executeTools(
+                assignment.toolInvocations,
+                runID: runID,
+                task: assignment.task
+            )
+            for result in toolResults {
+                await memory.remember("Tool \(result.name) returned: \(result.output)")
+            }
+
+            let memorySnapshot = await memory.snapshot()
+            let prompt = Self.buildPrompt(
+                agentName: name,
+                purpose: purpose,
+                task: assignment.task,
+                context: assignment.context,
+                memory: memorySnapshot,
+                tools: availableToolDescriptions(),
+                toolResults: toolResults
+            )
+
+            let output = try await agent.send(prompt)
+            await memory.remember("Task: \(assignment.task)\nAnswer: \(output)")
+
+            let completedAt = Date()
+            await emit(
+                runID: runID,
+                task: assignment.task,
+                phase: .completed,
+                message: "Subagent \(name) completed."
+            )
+
+            return VoiceSubAgentResult(
+                runID: runID,
+                agentName: name,
+                task: assignment.task,
+                output: output,
+                toolResults: toolResults,
+                memory: await memory.snapshot(),
+                session: await agent.snapshot(),
+                startedAt: startedAt,
+                completedAt: completedAt
+            )
+        } catch {
+            await emit(
+                runID: runID,
+                task: assignment.task,
+                phase: .failed,
+                message: error.localizedDescription
+            )
+            throw error
+        }
+    }
+
+    public func executeTool(_ invocation: VoiceAgentToolInvocation) async throws -> VoiceAgentToolResult {
+        let runID = UUID()
+        return try await executeTools([invocation], runID: runID, task: "manual tool execution").first!
+    }
+
+    public func memorySnapshot() async -> VoiceAgentMemorySnapshot {
+        await memory.snapshot()
+    }
+
+    public func sessionSnapshot() async -> VoiceAgentSessionSnapshot {
+        await agent.snapshot()
+    }
+
+    public func reset(keepingSystemPrompt: Bool = true, clearingMemory: Bool = false) async {
+        await agent.reset(keepingSystemPrompt: keepingSystemPrompt)
+        if clearingMemory {
+            await memory.reset()
+        }
+    }
+
+    public func availableTools() -> [String] {
+        tools.keys.sorted()
+    }
+
+    private func executeTools(
+        _ invocations: [VoiceAgentToolInvocation],
+        runID: UUID,
+        task: String
+    ) async throws -> [VoiceAgentToolResult] {
+        guard !invocations.isEmpty else { return [] }
+
+        let memorySnapshot = await memory.snapshot()
+        let session = await agent.snapshot()
+        let context = VoiceAgentToolContext(
+            sessionID: session.sessionID,
+            agentName: name,
+            memory: memorySnapshot
+        )
+
+        var results: [VoiceAgentToolResult] = []
+        results.reserveCapacity(invocations.count)
+        for invocation in invocations {
+            guard let tool = tools[invocation.name] else {
+                throw VoiceAgentError.unknownTool(agentName: name, toolName: invocation.name)
+            }
+            await emit(
+                runID: runID,
+                task: task,
+                phase: .toolStarted,
+                toolName: invocation.name,
+                message: "Tool \(invocation.name) started."
+            )
+            let output = try await tool.call(input: invocation.input, context: context)
+            results.append(
+                VoiceAgentToolResult(
+                    name: invocation.name,
+                    input: invocation.input,
+                    output: output
+                )
+            )
+            await emit(
+                runID: runID,
+                task: task,
+                phase: .toolFinished,
+                toolName: invocation.name,
+                message: "Tool \(invocation.name) finished."
+            )
+        }
+        return results
+    }
+
+    private func emit(
+        runID: UUID,
+        task: String,
+        phase: VoiceSubAgentEventPhase,
+        toolName: String? = nil,
+        message: String? = nil
+    ) async {
+        guard let eventHandler else { return }
+        await eventHandler(
+            VoiceSubAgentEvent(
+                runID: runID,
+                agentName: name,
+                task: task,
+                phase: phase,
+                toolName: toolName,
+                message: message
+            )
+        )
+    }
+
+    private func availableToolDescriptions() -> [String] {
+        tools.values
+            .sorted { $0.name < $1.name }
+            .map { "\($0.name): \($0.description)" }
+    }
+
+    private static func buildPrompt(
+        agentName: String,
+        purpose: String,
+        task: String,
+        context: String?,
+        memory: VoiceAgentMemorySnapshot,
+        tools: [String],
+        toolResults: [VoiceAgentToolResult]
+    ) -> String {
+        var sections: [String] = [
+            "Subagent: \(agentName)",
+            "Purpose: \(purpose)",
+            "Task:\n\(task)",
+        ]
+
+        if let context, !context.isEmpty {
+            sections.append("Shared context:\n\(context)")
+        }
+
+        sections.append("Memory:\n\(memory.rendered)")
+
+        if !tools.isEmpty {
+            sections.append("Available tools:\n" + tools.map { "- \($0)" }.joined(separator: "\n"))
+        }
+
+        if !toolResults.isEmpty {
+            let renderedResults = toolResults
+                .map { "- \($0.name)(\($0.input)) -> \($0.output)" }
+                .joined(separator: "\n")
+            sections.append("Tool results:\n\(renderedResults)")
+        }
+
+        sections.append("Return your result for the supervisor. Be concise and include relevant evidence from memory or tools.")
+        return sections.joined(separator: "\n\n")
+    }
+}
+
+public actor VoiceAgentOrchestrator {
+    private let supervisor: VoiceAgent
+    private var subAgents: [String: VoiceSubAgent]
+
+    public init(supervisor: VoiceAgent, subAgents: [VoiceSubAgent]) {
+        self.supervisor = supervisor
+        self.subAgents = Dictionary(uniqueKeysWithValues: subAgents.map { ($0.name, $0) })
+    }
+
+    public func addSubAgent(_ subAgent: VoiceSubAgent) {
+        subAgents[subAgent.name] = subAgent
+    }
+
+    public func availableSubAgents() -> [String] {
+        subAgents.keys.sorted()
+    }
+
+    public func run(_ input: String) async throws -> VoiceAgentOrchestrationResult {
+        let assignments = subAgents.keys.sorted().map {
+            VoiceSubAgentAssignment(agentName: $0, task: input)
+        }
+        return try await run(input, assignments: assignments)
+    }
+
+    public func run(
+        _ input: String,
+        assignments: [VoiceSubAgentAssignment]
+    ) async throws -> VoiceAgentOrchestrationResult {
+        let results = try await runSubAgents(assignments)
+            .sorted { $0.agentName < $1.agentName }
+
+        let finalPrompt = Self.buildSupervisorPrompt(input: input, results: results)
+        let finalOutput = try await supervisor.send(finalPrompt)
+        return VoiceAgentOrchestrationResult(
+            input: input,
+            finalOutput: finalOutput,
+            subAgentResults: results,
+            supervisorSession: await supervisor.snapshot()
+        )
+    }
+
+    private func runSubAgents(_ assignments: [VoiceSubAgentAssignment]) async throws -> [VoiceSubAgentResult] {
+        try await withThrowingTaskGroup(of: VoiceSubAgentResult.self) { group in
+            for assignment in assignments {
+                guard let subAgent = subAgents[assignment.agentName] else {
+                    throw VoiceAgentError.unknownSubAgent(assignment.agentName)
+                }
+
+                group.addTask {
+                    try await subAgent.run(assignment)
+                }
+            }
+
+            var results: [VoiceSubAgentResult] = []
+            for try await result in group {
+                results.append(result)
+            }
+            return results
+        }
+    }
+
+    private static func buildSupervisorPrompt(
+        input: String,
+        results: [VoiceSubAgentResult]
+    ) -> String {
+        let rendered = results.map { result in
+            """
+            [\(result.agentName)]
+            Task: \(result.task)
+            Output:
+            \(result.output)
+            """
+        }.joined(separator: "\n\n")
+
+        return """
+        User request:
+        \(input)
+
+        Subagent results:
+        \(rendered)
+
+        Produce the final answer for the user. Resolve disagreements, keep it concise, and preserve useful details.
+        """
     }
 }

@@ -9,6 +9,16 @@ private struct MockVoiceAgentClient: VoiceAgentLLMClient {
     }
 }
 
+private struct MockVoiceAgentTool: VoiceAgentTool {
+    var name: String
+    var description: String
+    var handler: @Sendable (String, VoiceAgentToolContext) async throws -> String
+
+    func call(input: String, context: VoiceAgentToolContext) async throws -> String {
+        try await handler(input, context)
+    }
+}
+
 private actor RequestRecorder {
     private var requests: [OpenAIChatCompletionRequest] = []
 
@@ -22,12 +32,27 @@ private actor RequestRecorder {
     }
 }
 
+private actor SubAgentEventRecorder {
+    private var events: [VoiceSubAgentEvent] = []
+
+    func record(_ event: VoiceSubAgentEvent) {
+        events.append(event)
+    }
+
+    func all() -> [VoiceSubAgentEvent] {
+        events
+    }
+}
+
 enum VoiceAgentSelfTests {
     static func runAll() async throws {
         try testOpenAIRequestEncoding()
         try testHardcodedConfigDefaults()
         try await testConversationHistory()
         try await testMultiTurnSessionCarriesContext()
+        try await testSubAgentMemoryAndTools()
+        try await testOrchestratorRunsSubAgentsAndSynthesizes()
+        try await testUnknownToolError()
         try await testResetKeepsSystemPrompt()
         try await testEmptyResponseError()
     }
@@ -135,6 +160,155 @@ enum VoiceAgentSelfTests {
         let snapshot = await agent.snapshot()
         try expect(snapshot.turnCount == 2, "snapshot should count user turns")
         try expect(snapshot.messages.count == 5, "snapshot should contain system and two completed turns")
+    }
+
+    private static func testSubAgentMemoryAndTools() async throws {
+        let recorder = RequestRecorder()
+        let events = SubAgentEventRecorder()
+        let client = MockVoiceAgentClient { request in
+            let count = await recorder.record(request)
+            return .assistant("subagent answer \(count)")
+        }
+        let lookup = MockVoiceAgentTool(
+            name: "lookup",
+            description: "Return lookup data."
+        ) { input, context in
+            try expect(context.agentName == "researcher", "tool context should include agent name")
+            return "lookup(\(input))"
+        }
+
+        let subAgent = VoiceSubAgent(
+            name: "researcher",
+            purpose: "Find facts.",
+            model: "gpt-test",
+            systemPrompt: "You are a researcher.",
+            client: client,
+            tools: [lookup],
+            eventHandler: { event in
+                await events.record(event)
+            }
+        )
+
+        let first = try await subAgent.run(
+            VoiceSubAgentAssignment(
+                agentName: "researcher",
+                task: "查一下蓝莓",
+                toolInvocations: [
+                    VoiceAgentToolInvocation(name: "lookup", input: "blueberry"),
+                ]
+            )
+        )
+
+        try expect(first.output == "subagent answer 1", "subagent should return model output")
+        try expect(first.toolResults == [
+            VoiceAgentToolResult(name: "lookup", input: "blueberry", output: "lookup(blueberry)"),
+        ], "subagent should expose tool results")
+        try expect(first.memory.rendered.contains("Tool lookup returned: lookup(blueberry)"), "memory should retain tool result")
+
+        let firstRunEvents = await events.all()
+        try expect(
+            firstRunEvents.map(\.phase) == [.started, .toolStarted, .toolFinished, .completed],
+            "subagent should explicitly emit start/tool/completed lifecycle events"
+        )
+        try expect(
+            Set(firstRunEvents.map(\.runID)) == [first.runID],
+            "all first-run events should use the result runID"
+        )
+        try expect(
+            firstRunEvents.first?.agentName == "researcher"
+                && firstRunEvents.first?.task == "查一下蓝莓",
+            "started event should identify subagent and task"
+        )
+
+        _ = try await subAgent.run(
+            VoiceSubAgentAssignment(agentName: "researcher", task: "复述刚才查到的内容")
+        )
+
+        let requests = await recorder.all()
+        try expect(requests.count == 2, "subagent should make two model requests")
+        try expect(
+            requests[1].messages.last?.content.contains("Tool lookup returned: lookup(blueberry)") == true,
+            "second subagent request should include persisted memory"
+        )
+        try expect(
+            requests[1].messages.last?.content.contains("Task: 查一下蓝莓") == true,
+            "second subagent request should include previous task memory"
+        )
+    }
+
+    private static func testOrchestratorRunsSubAgentsAndSynthesizes() async throws {
+        let client = MockVoiceAgentClient { request in
+            let prompt = request.messages.last?.content ?? ""
+            if prompt.contains("Subagent: planner") {
+                return .assistant("planner result")
+            }
+            if prompt.contains("Subagent: critic") {
+                return .assistant("critic result")
+            }
+            if prompt.contains("Subagent results:") {
+                try expect(prompt.contains("planner result"), "supervisor should see planner result")
+                try expect(prompt.contains("critic result"), "supervisor should see critic result")
+                return .assistant("final synthesis")
+            }
+            return .assistant("unexpected")
+        }
+
+        let supervisor = VoiceAgent(
+            model: "gpt-test",
+            systemPrompt: "You supervise subagents.",
+            client: client
+        )
+        let planner = VoiceSubAgent(
+            name: "planner",
+            purpose: "Create a plan.",
+            model: "gpt-test",
+            systemPrompt: "You plan.",
+            client: client
+        )
+        let critic = VoiceSubAgent(
+            name: "critic",
+            purpose: "Find risks.",
+            model: "gpt-test",
+            systemPrompt: "You critique.",
+            client: client
+        )
+        let orchestrator = VoiceAgentOrchestrator(
+            supervisor: supervisor,
+            subAgents: [planner, critic]
+        )
+
+        let result = try await orchestrator.run("设计 Mode 2 的工作流")
+        try expect(result.finalOutput == "final synthesis", "orchestrator should return supervisor output")
+        try expect(result.subAgentResults.map(\.agentName) == ["critic", "planner"], "subagent results should be sorted")
+        try expect(result.subAgentResults.map(\.output).sorted() == ["critic result", "planner result"], "orchestrator should include both subagent outputs")
+        try expect(result.supervisorSession.turnCount == 1, "supervisor should keep orchestration memory")
+    }
+
+    private static func testUnknownToolError() async throws {
+        let client = MockVoiceAgentClient { _ in .assistant("unused") }
+        let subAgent = VoiceSubAgent(
+            name: "worker",
+            purpose: "Work.",
+            model: "gpt-test",
+            systemPrompt: "You work.",
+            client: client
+        )
+
+        do {
+            _ = try await subAgent.run(
+                VoiceSubAgentAssignment(
+                    agentName: "worker",
+                    task: "call missing tool",
+                    toolInvocations: [
+                        VoiceAgentToolInvocation(name: "missing", input: "x"),
+                    ]
+                )
+            )
+            throw SelfTestFailure("unknown tool should throw")
+        } catch VoiceAgentError.unknownTool(let agentName, let toolName) {
+            try expect(agentName == "worker", "unknown tool error should include agent name")
+            try expect(toolName == "missing", "unknown tool error should include tool name")
+        }
     }
 
     private static func testResetKeepsSystemPrompt() async throws {
