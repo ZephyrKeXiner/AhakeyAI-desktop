@@ -27,6 +27,8 @@ ICON_SOURCE="${ICON_SOURCE:-$APP_ROOT/VibeCodeKeyboard.ico}"
 ICONSET_DIR="$APP_ROOT/.build/AhaKeyConfig.iconset"
 ICNS_PATH="$APP_ROOT/.build/AhaKeyConfig.icns"
 SIGNING_IDENTITY="${AHAKEY_DEBUG_SIGNING_IDENTITY:-${SIGNING_IDENTITY:-}}"
+BUILD_ARCH="${BUILD_ARCH:-$(uname -m)}"
+MIN_SYSTEM_VERSION="${MIN_SYSTEM_VERSION:-14.0}"
 
 # 本地 Debug 默认启用稳定自签证书：TCC 会按证书 CN 记授权，
 # 避免 ad-hoc 签名每次 build 因 cdhash 变化而掉权限。
@@ -43,11 +45,11 @@ fi
 
 echo "🐞 Debug building $APP_DISPLAY_NAME..."
 cd "$APP_ROOT"
-swift build -c debug --arch arm64 --product AhaKeyConfig
-swift build -c debug --arch arm64 --product ahakeyconfig-agent
+swift build -c debug --arch "$BUILD_ARCH" --product AhaKeyConfig
+swift build -c debug --arch "$BUILD_ARCH" --product ahakeyconfig-agent
 
-BUILD_OUTPUT=".build/arm64-apple-macosx/debug/$EXECUTABLE_NAME"
-AGENT_OUTPUT=".build/arm64-apple-macosx/debug/ahakeyconfig-agent"
+BUILD_OUTPUT=".build/$BUILD_ARCH-apple-macosx/debug/$EXECUTABLE_NAME"
+AGENT_OUTPUT=".build/$BUILD_ARCH-apple-macosx/debug/ahakeyconfig-agent"
 if [[ ! -f "$BUILD_OUTPUT" ]]; then
   echo "Build output not found at $BUILD_OUTPUT"
   exit 1
@@ -120,7 +122,7 @@ if [[ "$NEED_PLIST" == "1" ]]; then
   <key>CFBundleVersion</key>
   <string>${BUILD_NUMBER}</string>
   <key>LSMinimumSystemVersion</key>
-  <string>15.0</string>
+  <string>${MIN_SYSTEM_VERSION}</string>
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>AhaKey 配置需要蓝牙连接你的 AhaKey 键盘。</string>
   <key>NSMicrophoneUsageDescription</key>
