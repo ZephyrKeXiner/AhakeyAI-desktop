@@ -30,8 +30,9 @@ cd "$APP_ROOT"
 swift build -c release --arch "$BUILD_ARCH" --product AhaKeyConfig
 swift build -c release --arch "$BUILD_ARCH" --product ahakeyconfig-agent
 
-BUILD_OUTPUT=".build/$BUILD_ARCH-apple-macosx/release/$EXECUTABLE_NAME"
-AGENT_OUTPUT=".build/$BUILD_ARCH-apple-macosx/release/ahakeyconfig-agent"
+RELEASE_BUILD_DIR=".build/$BUILD_ARCH-apple-macosx/release"
+BUILD_OUTPUT="$RELEASE_BUILD_DIR/$EXECUTABLE_NAME"
+AGENT_OUTPUT="$RELEASE_BUILD_DIR/ahakeyconfig-agent"
 if [[ ! -f "$BUILD_OUTPUT" ]]; then
   echo "Build output not found at $BUILD_OUTPUT"
   exit 1
@@ -57,6 +58,54 @@ iconutil -c icns "$ICONSET_DIR" -o "$ICNS_PATH"
 cp "$BUILD_OUTPUT" "$APP_EXECUTABLE"
 cp "$AGENT_OUTPUT" "$AGENT_EXECUTABLE"
 cp "$ICNS_PATH" "$APP_BUNDLE/Contents/Resources/AhaKeyConfig.icns"
+
+# Keep SwiftPM resource bundles inside Contents/Resources so the .app signs cleanly.
+for resource_bundle in "$RELEASE_BUILD_DIR"/*.bundle(N); do
+  bundle_name="$(basename "$resource_bundle")"
+  rm -rf "$APP_BUNDLE/Contents/Resources/$bundle_name"
+  ditto "$resource_bundle" "$APP_BUNDLE/Contents/Resources/$bundle_name"
+done
+
+# 内置默认 OLED 动图：供 AhaKeyOLEDDraft 在用户未自定义时作为出厂预览/上传素材。
+if [[ -d "$APP_ROOT/Resources/DefaultOLED" ]]; then
+  mkdir -p "$APP_BUNDLE/Contents/Resources/DefaultOLED"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete \
+      --exclude='.DS_Store' --exclude='._*' --exclude='.*.swp' \
+      "$APP_ROOT/Resources/DefaultOLED/" \
+      "$APP_BUNDLE/Contents/Resources/DefaultOLED/"
+  else
+    rm -rf "$APP_BUNDLE/Contents/Resources/DefaultOLED"
+    mkdir -p "$APP_BUNDLE/Contents/Resources/DefaultOLED"
+    find "$APP_ROOT/Resources/DefaultOLED" -type f \
+      ! -name '.DS_Store' ! -name '._*' ! -name '.*.swp' \
+      -exec cp {} "$APP_BUNDLE/Contents/Resources/DefaultOLED/" \;
+  fi
+fi
+
+# 内置 lark-cli 二进制（从 npm global 或已知路径拷贝）
+LARK_CLI_BINARY=""
+LARK_CLI_CANDIDATES=(
+  "$HOME/.npm-global/lib/node_modules/@larksuite/cli/bin/lark-cli"
+  "/usr/local/lib/node_modules/@larksuite/cli/bin/lark-cli"
+  "/opt/homebrew/lib/node_modules/@larksuite/cli/bin/lark-cli"
+  "/usr/local/bin/lark-cli"
+  "/opt/homebrew/bin/lark-cli"
+)
+for candidate in "${LARK_CLI_CANDIDATES[@]}"; do
+  if [[ -f "$candidate" ]]; then
+    LARK_CLI_BINARY="$candidate"
+    break
+  fi
+done
+
+if [[ -n "$LARK_CLI_BINARY" ]]; then
+  echo "📎 Bundling lark-cli from: $LARK_CLI_BINARY"
+  cp "$LARK_CLI_BINARY" "$APP_BUNDLE/Contents/MacOS/lark-cli"
+  chmod +x "$APP_BUNDLE/Contents/MacOS/lark-cli"
+else
+  echo "⚠️  lark-cli binary not found, skipping bundle (Feishu integration won't work without it)"
+fi
 
 BUILD_NUMBER="$(git -C "$APP_ROOT/../.." rev-list --count HEAD 2>/dev/null || echo 1)"
 
@@ -141,11 +190,17 @@ if [[ -n "${SIGNING_IDENTITY}" ]]; then
 
   codesign "${SIGN_ARGS[@]}" "$APP_EXECUTABLE"
   codesign "${SIGN_ARGS[@]}" "$AGENT_EXECUTABLE"
+  if [[ -f "$APP_BUNDLE/Contents/MacOS/lark-cli" ]]; then
+    codesign "${SIGN_ARGS[@]}" "$APP_BUNDLE/Contents/MacOS/lark-cli"
+  fi
   codesign "${SIGN_ARGS[@]}" --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
 else
   echo "🧪 No signing identity found, using ad-hoc signature for local testing"
   codesign --force --sign - "$APP_EXECUTABLE"
   codesign --force --sign - "$AGENT_EXECUTABLE"
+  if [[ -f "$APP_BUNDLE/Contents/MacOS/lark-cli" ]]; then
+    codesign --force --sign - "$APP_BUNDLE/Contents/MacOS/lark-cli"
+  fi
   codesign --force --sign - "$APP_BUNDLE"
 fi
 

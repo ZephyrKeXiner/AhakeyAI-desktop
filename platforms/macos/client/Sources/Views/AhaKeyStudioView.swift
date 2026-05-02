@@ -2,6 +2,7 @@ import AppKit
 import AhaKeyConfigUI
 import SwiftUI
 import UniformTypeIdentifiers
+import VoiceAgent
 
 private enum AhaKeyWorkspaceSection: String, CaseIterable, Identifiable {
     case workbench
@@ -38,6 +39,7 @@ struct AhaKeyStudioView: View {
     @Binding private var rootWorkspaceMode: AhaKeyRootWorkspaceMode
     @StateObject private var voiceRelay = VoiceRelayService.shared
     @StateObject private var nativeSpeech = NativeSpeechTranscriptionService.shared
+    @StateObject private var voiceAgentSession = VoiceAgentSessionStore.shared
     @StateObject private var agentManager = AgentManager.shared
 
     @State private var studioDraft: AhaKeyStudioDraft
@@ -49,6 +51,7 @@ struct AhaKeyStudioView: View {
     @State private var syncStatusMessage = "修改会先保存在本地，连接设备后再同步。"
     @State private var isSyncing = false
     @State private var showsOLEDPlaybackPreview = false
+    @State private var showsVoiceAgentConfiguration = false
     @State private var selectedWorkspace: AhaKeyWorkspaceSection = .workbench
     @AppStorage(AhaKeyAppearanceMode.storageKey) private var appearanceModeRaw = AhaKeyAppearanceMode.light.rawValue
 
@@ -91,6 +94,7 @@ struct AhaKeyStudioView: View {
             agentManager.applyStoredBluetoothPreferenceOnLaunch(bleManager: bleManager)
             voiceRelay.start()
             nativeSpeech.start()
+            voiceAgentSession.start(keyboardMode: AhaKeyModeSlot(rawValue: bleManager.workMode) ?? .mode0)
             applyCursorRejectMacroSelfHealIfNeeded()
             voiceRelay.updateRoutes(from: studioDraft)
             SwitchStateNotifier.shared.bind(to: bleManager)
@@ -110,6 +114,9 @@ struct AhaKeyStudioView: View {
             if let slot = AhaKeyModeSlot(rawValue: newValue), slot != selectedMode {
                 selectedMode = slot
             }
+            if let slot = AhaKeyModeSlot(rawValue: newValue) {
+                voiceAgentSession.updateKeyboardMode(slot)
+            }
         }
         .alert("Agent", isPresented: Binding(
             get: { agentManager.agentUserAlert != nil },
@@ -126,6 +133,15 @@ struct AhaKeyStudioView: View {
                 modeTitle: selectedMode.title,
                 assetPath: currentModeDraft.oled.localAssetPath
             )
+        }
+        .sheet(isPresented: $voiceRelay.showsPermissionOnboarding) {
+            VoicePermissionOnboardingSheet(
+                voiceRelay: voiceRelay,
+                nativeSpeech: nativeSpeech
+            )
+        }
+        .sheet(isPresented: $showsVoiceAgentConfiguration) {
+            voiceAgentConfigurationSheet
         }
     }
 
@@ -389,11 +405,7 @@ struct AhaKeyStudioView: View {
         ZStack {
             switch selectedWorkspace {
             case .workbench:
-                if rootWorkspaceMode == .newWorkbench {
-                    agentWorkbenchWorkspace
-                } else {
-                    workbenchWorkspace
-                }
+                workbenchWorkspace
             case .deviceInfo:
                 deviceInfoWorkspace
             case .ai:
@@ -435,10 +447,18 @@ struct AhaKeyStudioView: View {
                 }
             )
             Divider()
-            HStack(spacing: 0) {
-                canvasPane
-                Divider()
-                inspectorPane
+            if selectedMode == .mode2 {
+                VoiceAgentWorkspaceView(
+                    session: voiceAgentSession,
+                    modeEditorHeader: modeEditorHeader,
+                    onOpenConfiguration: openVoiceAgentConfiguration
+                )
+            } else {
+                HStack(spacing: 0) {
+                    canvasPane
+                    Divider()
+                    inspectorPane
+                }
             }
         }
     }
@@ -888,10 +908,10 @@ struct AhaKeyStudioView: View {
     private var configurationModeStatus: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(isEditingConfiguration ? Color.blue : Color.green)
+                .fill(selectedMode == .mode2 ? Color.purple : (isEditingConfiguration ? Color.blue : Color.green))
                 .frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 1) {
-                Text(isEditingConfiguration ? "编辑配置中" : "键盘控制中")
+                Text(configurationModeTitle)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.primary)
                 Text(configurationModeDetail)
@@ -1922,7 +1942,7 @@ struct AhaKeyStudioView: View {
 
     private var statusBar: some View {
         HStack(spacing: 16) {
-            Label("语音服务 运行中", systemImage: "mic")
+            Label(statusBarSelectionText, systemImage: statusBarSelectionIcon)
                 .font(AhaKeyUI.Font.subhead)
             Divider()
                 .frame(height: 14)
@@ -1957,6 +1977,171 @@ struct AhaKeyStudioView: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
         .background(chromeBarBackground)
+    }
+
+    private var voiceAgentConfigurationSheet: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("VoiceAgent 设置")
+                    .font(.headline)
+                Spacer()
+                Button("关闭") {
+                    showsVoiceAgentConfiguration = false
+                }
+            }
+            .padding(16)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    // 新手指引
+                    setupGuideSection
+
+                    GroupBox("AI 模型") {
+                        LLMConfigView()
+                            .padding(.top, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    GroupBox("飞书 / Lark") {
+                        FeishuSetupView()
+                            .padding(.top, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(16)
+            }
+        }
+        .frame(width: 640, height: 760)
+    }
+
+    private var setupGuideSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(.purple)
+                Text("快速开始")
+                    .font(.title3.weight(.semibold))
+            }
+
+            Text("按照以下步骤完成配置，即可通过语音让 AI 助手帮你发飞书消息。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 14) {
+                guideStep(
+                    number: 1,
+                    title: "配置 AI 模型",
+                    description: "在下方「AI 模型」区域填入你的 API Key。支持 OpenAI、Claude（需代理）、Deepseek、通义等兼容接口。",
+                    isDone: llmAPIKeyConfigured
+                )
+
+                guideStep(
+                    number: 2,
+                    title: "配置飞书",
+                    description: "在飞书开放平台创建应用获取 App ID 和 Secret，填入下方「飞书」区域后扫码登录。\n需要的权限：im:message（消息）、contact:user:search（通讯录）。",
+                    link: ("打开飞书开放平台", "https://open.feishu.cn/app"),
+                    isDone: larkCLIInstalled
+                )
+
+                guideStep(
+                    number: 3,
+                    title: "添加联系人（可选）",
+                    description: "预设常用群聊或联系人可以加速消息发送。也可以不设置，直接说联系人名字，AI 会自动搜索。",
+                    isDone: false
+                )
+            }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+        }
+    }
+
+    private func guideStep(
+        number: Int,
+        title: String,
+        description: String,
+        code: String? = nil,
+        link: (String, String)? = nil,
+        isDone: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(isDone ? Color.green : Color.blue.opacity(0.15))
+                    .frame(width: 24, height: 24)
+                if isDone {
+                    Image(systemName: "checkmark")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.white)
+                } else {
+                    Text("\(number)")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.callout.weight(.semibold))
+                Text(description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let code {
+                    Text(code)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .padding(6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.05)))
+                }
+
+                if let link {
+                    Button(link.0) {
+                        if let url = URL(string: link.1) {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .controlSize(.small)
+                }
+            }
+        }
+    }
+
+    private var larkCLIInstalled: Bool {
+        // 检查 app bundle 内置或系统安装的 lark-cli
+        var paths: [String] = []
+        if let bundlePath = Bundle.main.executableURL?
+            .deletingLastPathComponent()
+            .appendingPathComponent("lark-cli").path {
+            paths.append(bundlePath)
+        }
+        paths += [
+            "/usr/local/bin/lark-cli",
+            "/opt/homebrew/bin/lark-cli",
+            ProcessInfo.processInfo.environment["HOME"].map { "\($0)/.npm-global/bin/lark-cli" },
+        ].compactMap { $0 }
+        return paths.contains { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    private var llmAPIKeyConfigured: Bool {
+        VoiceAgentRuntimeConfig.openAIAPIKey != nil
+    }
+
+    private func settingRow(title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.callout.weight(.semibold))
+                .frame(width: 110, alignment: .leading)
+            Text(value)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
     }
 
     private var chromeBarBackground: Color {
@@ -2015,7 +2200,17 @@ struct AhaKeyStudioView: View {
         agentManager.bluetoothConnectionOwner == .ahaKeyStudio
     }
 
+    private var configurationModeTitle: String {
+        if selectedMode == .mode2 {
+            return "VoiceAgent"
+        }
+        return isEditingConfiguration ? "编辑配置中" : "键盘控制中"
+    }
+
     private var configurationModeDetail: String {
+        if selectedMode == .mode2 {
+            return "主 agent 工作台"
+        }
         if isEditingConfiguration {
             if bleManager.isConnected {
                 return "AhaKey Studio 正在配置键盘"
@@ -2035,6 +2230,9 @@ struct AhaKeyStudioView: View {
     }
 
     private var configurationModeButtonTitle: String {
+        if selectedMode == .mode2 {
+            return "VoiceAgent 设置"
+        }
         if isSyncing {
             return "同步中…"
         }
@@ -2045,6 +2243,9 @@ struct AhaKeyStudioView: View {
     }
 
     private var configurationModeButtonHelp: String {
+        if selectedMode == .mode2 {
+            return "打开 VoiceAgent 运行时配置入口；当前 API key 暂时从 Keychain 读取。"
+        }
         if isEditingConfiguration {
             if hasUnsyncedChanges {
                 return "将当前草稿同步到键盘，然后把蓝牙交还给 Agent。"
@@ -2052,6 +2253,20 @@ struct AhaKeyStudioView: View {
             return "没有未同步改动，直接把蓝牙交还给 Agent。"
         }
         return "临时由 AhaKey Studio 接管蓝牙，用于改键、OLED、同步和本机灯效测试。"
+    }
+
+    private var statusBarSelectionText: String {
+        if selectedMode == .mode2 {
+            return "VoiceAgent · \(selectedMode.title)"
+        }
+        return "\(selectedPart.title) · \(selectedMode.title)"
+    }
+
+    private var statusBarSelectionIcon: String {
+        if selectedMode == .mode2 {
+            return "point.3.connected.trianglepath.dotted"
+        }
+        return selectedPart.systemImage
     }
 
     private var syncToKeyboardButtonTitle: String {
@@ -2339,11 +2554,20 @@ struct AhaKeyStudioView: View {
     }
 
     private func handleConfigurationModeButton() {
+        if selectedMode == .mode2 {
+            openVoiceAgentConfiguration()
+            return
+        }
         if isEditingConfiguration {
             finishEditingConfiguration()
         } else {
             enterEditingConfiguration()
         }
+    }
+
+    private func openVoiceAgentConfiguration() {
+        showsVoiceAgentConfiguration = true
+        syncStatusMessage = "VoiceAgent 配置入口已预留，当前运行时读取 Keychain。"
     }
 
     private func enterEditingConfiguration() {
