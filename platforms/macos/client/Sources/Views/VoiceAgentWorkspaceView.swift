@@ -1,24 +1,26 @@
 import SwiftUI
 import VoiceAgent
 
-@MainActor
-private func makeDefaultVoiceAssistantModel() -> VoiceAssistantModel {
-    VoiceAssistantModel.voiceAssistant(subAgents: defaultVoiceSubAgents())
-}
-
-private func defaultVoiceSubAgents() -> [VoiceSubAgent] {
-    [VoiceSubAgent.feishuMessenger()].compactMap { $0 }
-}
-
 struct VoiceAgentWorkspaceView<Header: View>: View {
-    @StateObject private var assistantModel = makeDefaultVoiceAssistantModel()
+    @ObservedObject private var session: VoiceAgentSessionStore
+    @ObservedObject private var assistantModel: VoiceAssistantModel
     @StateObject private var nativeSpeech = NativeSpeechTranscriptionService.shared
     @State private var promptDraft = ""
-    @State private var runSnapshots: [VoiceAgentRunSnapshot] = []
-    @State private var selectedRunID: UUID?
 
     var modeEditorHeader: Header
     var onOpenConfiguration: (() -> Void)?
+
+    @MainActor
+    init(
+        session: VoiceAgentSessionStore,
+        modeEditorHeader: Header,
+        onOpenConfiguration: (() -> Void)? = nil
+    ) {
+        self.session = session
+        self.assistantModel = session.assistantModel
+        self.modeEditorHeader = modeEditorHeader
+        self.onOpenConfiguration = onOpenConfiguration
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -27,16 +29,6 @@ struct VoiceAgentWorkspaceView<Header: View>: View {
             inspectorPane
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear {
-            installVoicePromptConsumer()
-        }
-        .onDisappear {
-            NativeSpeechTranscriptionService.shared.setFinalTranscriptConsumer(nil)
-        }
-        .task {
-            await assistantModel.registerInitialSubAgents()
-            await consumeRunEvents()
-        }
     }
 
     // MARK: - Canvas (Left)
@@ -95,7 +87,7 @@ struct VoiceAgentWorkspaceView<Header: View>: View {
                 inspectorHeader
                 actionButtons
 
-                if runSnapshots.isEmpty {
+                if session.runSnapshots.isEmpty {
                     emptyRunTree
                 } else {
                     ScrollView {
@@ -121,8 +113,8 @@ struct VoiceAgentWorkspaceView<Header: View>: View {
     }
 
     private var selectedRun: VoiceAgentRunSnapshot? {
-        guard let id = selectedRunID else { return nil }
-        return runSnapshots.first { $0.runID == id }
+        guard let id = session.selectedRunID else { return nil }
+        return session.runSnapshots.first { $0.runID == id }
     }
 
     private func runDetailPane(_ run: VoiceAgentRunSnapshot) -> some View {
@@ -138,7 +130,7 @@ struct VoiceAgentWorkspaceView<Header: View>: View {
                 Spacer()
 
                 Button {
-                    selectedRunID = nil
+                    session.selectedRunID = nil
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.secondary)
@@ -192,7 +184,7 @@ struct VoiceAgentWorkspaceView<Header: View>: View {
                 Label("Run Tree", systemImage: "list.bullet.indent")
                     .font(.system(size: 20, weight: .semibold))
                 Spacer()
-                Text("\(runSnapshots.count)")
+                Text("\(session.runSnapshots.count)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -310,7 +302,7 @@ struct VoiceAgentWorkspaceView<Header: View>: View {
 
     private func runRow(_ run: VoiceAgentRunSnapshot) -> some View {
         Button {
-            selectedRunID = selectedRunID == run.runID ? nil : run.runID
+            session.selectedRunID = session.selectedRunID == run.runID ? nil : run.runID
         } label: {
             HStack(alignment: .top, spacing: 10) {
                 Circle()
@@ -352,7 +344,7 @@ struct VoiceAgentWorkspaceView<Header: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(selectedRunID == run.runID ? Color.accentColor.opacity(0.13) : Color(nsColor: .controlBackgroundColor))
+                    .fill(session.selectedRunID == run.runID ? Color.accentColor.opacity(0.13) : Color(nsColor: .controlBackgroundColor))
             )
         }
         .buttonStyle(.plain)
@@ -378,7 +370,7 @@ struct VoiceAgentWorkspaceView<Header: View>: View {
     // MARK: - Logic
 
     private var orderedRuns: [VoiceAgentRunSnapshot] {
-        runSnapshots.sorted {
+        session.runSnapshots.sorted {
             if $0.startedAt == $1.startedAt {
                 return $0.runID.uuidString < $1.runID.uuidString
             }
@@ -400,41 +392,11 @@ struct VoiceAgentWorkspaceView<Header: View>: View {
         let text = promptDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         promptDraft = ""
-        await assistantModel.send(text)
-        runSnapshots = await assistantModel.runSnapshots()
-        selectedRunID = runSnapshots.last?.runID
+        await session.sendPrompt(text)
     }
 
     private func resetSession() async {
-        await assistantModel.reset()
-        runSnapshots = []
-        selectedRunID = nil
-    }
-
-    private func installVoicePromptConsumer() {
-        NativeSpeechTranscriptionService.shared.setFinalTranscriptConsumer { text in
-            Task { @MainActor in
-                await sendVoicePrompt(text)
-            }
-            return true
-        }
-    }
-
-    private func sendVoicePrompt(_ text: String) async {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        await assistantModel.send(trimmed)
-        runSnapshots = await assistantModel.runSnapshots()
-        selectedRunID = runSnapshots.last?.runID
-    }
-
-    private func consumeRunEvents() async {
-        for await _ in assistantModel.runEvents {
-            runSnapshots = await assistantModel.runSnapshots()
-            if selectedRunID == nil {
-                selectedRunID = runSnapshots.last?.runID
-            }
-        }
+        await session.reset()
     }
 
     private func statusColor(_ status: VoiceAgentRunStatus) -> Color {
@@ -452,8 +414,15 @@ struct VoiceAgentWorkspaceView<Header: View>: View {
 // MARK: - Convenience initializer (no header needed)
 
 extension VoiceAgentWorkspaceView where Header == EmptyView {
-    init(onOpenConfiguration: (() -> Void)? = nil) {
-        self.modeEditorHeader = EmptyView()
-        self.onOpenConfiguration = onOpenConfiguration
+    @MainActor
+    init(
+        session: VoiceAgentSessionStore,
+        onOpenConfiguration: (() -> Void)? = nil
+    ) {
+        self.init(
+            session: session,
+            modeEditorHeader: EmptyView(),
+            onOpenConfiguration: onOpenConfiguration
+        )
     }
 }

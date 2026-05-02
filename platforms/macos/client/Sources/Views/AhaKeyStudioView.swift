@@ -6,6 +6,7 @@ struct AhaKeyStudioView: View {
     @ObservedObject var bleManager: AhaKeyBLEManager
     @StateObject private var voiceRelay = VoiceRelayService.shared
     @StateObject private var nativeSpeech = NativeSpeechTranscriptionService.shared
+    @StateObject private var voiceAgentSession = VoiceAgentSessionStore.shared
     @StateObject private var agentManager = AgentManager.shared
 
     @State private var studioDraft: AhaKeyStudioDraft
@@ -49,6 +50,7 @@ struct AhaKeyStudioView: View {
             agentManager.applyStoredBluetoothPreferenceOnLaunch(bleManager: bleManager)
             voiceRelay.start()
             nativeSpeech.start()
+            voiceAgentSession.start(keyboardMode: AhaKeyModeSlot(rawValue: bleManager.workMode) ?? .mode0)
             applyCursorRejectMacroSelfHealIfNeeded()
             voiceRelay.updateRoutes(from: studioDraft)
             SwitchStateNotifier.shared.bind(to: bleManager)
@@ -67,6 +69,9 @@ struct AhaKeyStudioView: View {
         .onChange(of: bleManager.workMode) { _, newValue in
             if let slot = AhaKeyModeSlot(rawValue: newValue), slot != selectedMode {
                 selectedMode = slot
+            }
+            if let slot = AhaKeyModeSlot(rawValue: newValue) {
+                voiceAgentSession.updateKeyboardMode(slot)
             }
         }
         .alert("Agent", isPresented: Binding(
@@ -212,6 +217,7 @@ struct AhaKeyStudioView: View {
     private var mainPane: some View {
         if selectedMode == .mode2 {
             VoiceAgentWorkspaceView(
+                session: voiceAgentSession,
                 modeEditorHeader: modeEditorHeader,
                 onOpenConfiguration: openVoiceAgentConfiguration
             )
@@ -1182,7 +1188,7 @@ struct AhaKeyStudioView: View {
                     GroupBox("接口") {
                         VStack(alignment: .leading, spacing: 10) {
                             settingRow(title: "配置保存", value: "待接入")
-                            settingRow(title: "语音输入目标", value: "待接入 NativeSpeechTranscriptionService")
+                            settingRow(title: "语音输入目标", value: "硬件 Mode 2 发送给 VoiceAgent；其他模式写回当前光标")
                         }
                         .padding(.top, 4)
                         .frame(maxWidth: .infinity, alignment: .leading)

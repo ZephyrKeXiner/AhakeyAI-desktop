@@ -46,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         VoiceRelayService.shared.start()
         NativeSpeechTranscriptionService.shared.start()
+        VoiceAgentSessionStore.shared.start()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
