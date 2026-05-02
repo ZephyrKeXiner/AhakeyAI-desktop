@@ -126,6 +126,7 @@ public actor VoiceAgentRunner {
     private let onRunEvent: VoiceAgentRunEventCallback?
     private let limiter: ConcurrencyLimiter
     private let runRegistry: VoiceAgentRunRegistry
+    private var isRunning = false
     private var messages: [VoiceAgentMessage]
 
     public init(
@@ -154,6 +155,12 @@ public actor VoiceAgentRunner {
     /// Send user text and run the full agentic loop (tool calls + sub-agents).
     @discardableResult
     public func send(_ userText: String) async throws -> String {
+        guard !isRunning else {
+            throw VoiceAgentError.runAlreadyInProgress
+        }
+        isRunning = true
+        defer { isRunning = false }
+
         var working = messages
         working.append(.user(userText))
         var remainingSubagentCalls = Self.maxSubagentCallsPerRun

@@ -92,6 +92,7 @@ public final class Agent: ObservableObject {
     public func send(_ text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        guard !isThinking else { return }
 
         appendUser(trimmed)
         isThinking = true
@@ -149,12 +150,14 @@ public extension Agent {
     ) -> Agent {
         Agent(
             systemPrompt: """
-            你是 AhaKey Mode 2 的智能语音助手。
+            你是 AhaKey Mode 2 的智能语音助手，负责总管所有的事项。
             你可以直接回答简单问题。
-            只有当子任务彼此独立，且并行处理明显优于你自己串行完成时，才使用 subagent。
-            一次用户请求最多拆成 3-4 个子 agent；不要让子 agent 再委派 subagent。
+            接下来是你核心的任务：## 当你认为需要拆分任务时候，你需要综合情况委派不同的子 agent去完成任务。##
+            原则是：
+            1. 只有当子任务彼此独立，且并行处理明显优于你自己串行完成时，才使用 subagent。
+            2. 你需要统筹全局决定，这需要你成为一个富有洞见和规划能力的CEO。如何最优化完成任务是你要考虑的东西。
+            
             对于简单查询、总结、格式整理、依赖前序结果的任务，请直接完成。
-            回答简洁、直接、有条理。
             """,
             options: options,
             tools: tools,

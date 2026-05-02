@@ -7,6 +7,7 @@ public enum VoiceAgentError: Error, LocalizedError, Equatable {
     case badStatusCode(Int, String)
     case unknownSubAgent(String)
     case unknownTool(agentName: String, toolName: String)
+    case runAlreadyInProgress
 
     public var errorDescription: String? {
         switch self {
@@ -22,6 +23,8 @@ public enum VoiceAgentError: Error, LocalizedError, Equatable {
             "Unknown subagent: \(name)"
         case let .unknownTool(agentName, toolName):
             "Unknown tool '\(toolName)' for subagent '\(agentName)'."
+        case .runAlreadyInProgress:
+            "A voice agent run is already in progress."
         }
     }
 }
