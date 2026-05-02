@@ -22,14 +22,16 @@ LAUNCH_AFTER_INSTALL="${LAUNCH_AFTER_INSTALL:-0}"
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 REQUIRE_DEVELOPER_ID="${REQUIRE_DEVELOPER_ID:-0}"
 DEST_APP="$INSTALL_DIR/$APP_BUNDLE_NAME.app"
+BUILD_ARCH="${BUILD_ARCH:-$(uname -m)}"
+MIN_SYSTEM_VERSION="${MIN_SYSTEM_VERSION:-14.0}"
 
 echo "📦 Building $APP_DISPLAY_NAME..."
 cd "$APP_ROOT"
-swift build -c release --arch arm64 --product AhaKeyConfig
-swift build -c release --arch arm64 --product ahakeyconfig-agent
+swift build -c release --arch "$BUILD_ARCH" --product AhaKeyConfig
+swift build -c release --arch "$BUILD_ARCH" --product ahakeyconfig-agent
 
-BUILD_OUTPUT=".build/arm64-apple-macosx/release/$EXECUTABLE_NAME"
-AGENT_OUTPUT=".build/arm64-apple-macosx/release/ahakeyconfig-agent"
+BUILD_OUTPUT=".build/$BUILD_ARCH-apple-macosx/release/$EXECUTABLE_NAME"
+AGENT_OUTPUT=".build/$BUILD_ARCH-apple-macosx/release/ahakeyconfig-agent"
 if [[ ! -f "$BUILD_OUTPUT" ]]; then
   echo "Build output not found at $BUILD_OUTPUT"
   exit 1
@@ -84,7 +86,7 @@ cat > "$INFO_PLIST" <<PLIST
   <key>CFBundleVersion</key>
   <string>${BUILD_NUMBER}</string>
   <key>LSMinimumSystemVersion</key>
-  <string>15.0</string>
+  <string>${MIN_SYSTEM_VERSION}</string>
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>AhaKey 配置需要蓝牙连接你的 AhaKey 键盘。</string>
   <key>NSMicrophoneUsageDescription</key>
