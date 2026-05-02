@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import VoiceAgent
 
 struct AhaKeyStudioView: View {
     @ObservedObject var bleManager: AhaKeyBLEManager
@@ -1162,42 +1163,156 @@ struct AhaKeyStudioView: View {
             .padding(16)
             Divider()
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    GroupBox("运行时") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            settingRow(title: "API Key", value: "Keychain: com.ahakey.voiceagent / openai-compatible-api-key")
-                            settingRow(title: "Model", value: "读取 AHAKEY_OPENAI_MODEL，未设置时使用默认模型")
-                            settingRow(title: "Base URL", value: "读取 AHAKEY_OPENAI_BASE_URL，未设置时使用默认端点")
-                        }
-                        .padding(.top, 4)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 20) {
+                    // 新手指引
+                    setupGuideSection
+
+                    GroupBox("AI 模型") {
+                        LLMConfigView()
+                            .padding(.top, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
                     GroupBox("飞书 / Lark") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            settingRow(title: "App ID", value: "Keychain: com.ahakey.voiceagent / feishu-app-id")
-                            settingRow(title: "App Secret", value: "Keychain: com.ahakey.voiceagent / feishu-app-secret")
-                            Divider()
-                            FeishuContactsConfigView()
-                                .padding(.top, 4)
-                        }
-                        .padding(.top, 4)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-
-                    GroupBox("接口") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            settingRow(title: "配置保存", value: "待接入")
-                            settingRow(title: "语音输入目标", value: "硬件 Mode 2 发送给 VoiceAgent；其他模式写回当前光标")
-                        }
-                        .padding(.top, 4)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        FeishuSetupView()
+                            .padding(.top, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 .padding(16)
             }
         }
-        .frame(width: 600, height: 680)
+        .frame(width: 640, height: 760)
+    }
+
+    private var setupGuideSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(.purple)
+                Text("快速开始")
+                    .font(.title3.weight(.semibold))
+            }
+
+            Text("按照以下步骤完成配置，即可通过语音让 AI 助手帮你发飞书消息。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 14) {
+                guideStep(
+                    number: 1,
+                    title: "配置 AI 模型",
+                    description: "在下方「AI 模型」区域填入你的 API Key。支持 OpenAI、Claude（需代理）、Deepseek、通义等兼容接口。",
+                    isDone: llmAPIKeyConfigured
+                )
+
+                guideStep(
+                    number: 2,
+                    title: "安装 lark-cli",
+                    description: "在终端执行以下命令安装飞书命令行工具：",
+                    code: "npm install -g @larksuite/cli",
+                    isDone: larkCLIInstalled
+                )
+
+                guideStep(
+                    number: 3,
+                    title: "创建飞书应用",
+                    description: "前往飞书开放平台创建应用，获取 App ID 和 App Secret。\n需要开通权限：im:message（消息读写）",
+                    link: ("打开飞书开放平台", "https://open.feishu.cn/app"),
+                    isDone: feishuCredentialsSaved
+                )
+
+                guideStep(
+                    number: 4,
+                    title: "填写凭证并登录",
+                    description: "在下方「飞书 / Lark」区域填入 App ID 和 App Secret，保存后点击登录完成用户授权。",
+                    isDone: false
+                )
+
+                guideStep(
+                    number: 5,
+                    title: "添加联系人",
+                    description: "添加你常用的群聊或联系人，之后可以直接说「发消息给 XXX」。\n群聊 ID 可以通过 lark-cli 查询：",
+                    code: "lark-cli im +chat-search --as user --query \"群名\"",
+                    isDone: false
+                )
+            }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+        }
+    }
+
+    private func guideStep(
+        number: Int,
+        title: String,
+        description: String,
+        code: String? = nil,
+        link: (String, String)? = nil,
+        isDone: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(isDone ? Color.green : Color.blue.opacity(0.15))
+                    .frame(width: 24, height: 24)
+                if isDone {
+                    Image(systemName: "checkmark")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.white)
+                } else {
+                    Text("\(number)")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.callout.weight(.semibold))
+                Text(description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let code {
+                    Text(code)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .padding(6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.05)))
+                }
+
+                if let link {
+                    Button(link.0) {
+                        if let url = URL(string: link.1) {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .controlSize(.small)
+                }
+            }
+        }
+    }
+
+    private var larkCLIInstalled: Bool {
+        let paths = [
+            "/usr/local/bin/lark-cli",
+            "/opt/homebrew/bin/lark-cli",
+            ProcessInfo.processInfo.environment["HOME"].map { "\($0)/.npm-global/bin/lark-cli" },
+        ].compactMap { $0 }
+        return paths.contains { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    private var llmAPIKeyConfigured: Bool {
+        VoiceAgentRuntimeConfig.openAIAPIKey != nil
+    }
+
+    private var feishuCredentialsSaved: Bool {
+        VoiceAgentRuntimeConfig.feishuAppID != nil && VoiceAgentRuntimeConfig.feishuAppSecret != nil
     }
 
     private func settingRow(title: String, value: String) -> some View {

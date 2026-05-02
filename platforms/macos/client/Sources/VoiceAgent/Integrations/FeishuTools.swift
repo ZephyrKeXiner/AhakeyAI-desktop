@@ -73,15 +73,37 @@ public struct FeishuSendMessageTool: VoiceAgentTool {
             return "Error: provide either 'contact' name or 'receive_id'."
         }
 
-        let contentJSON = try makeTextContentJSON(message)
+        // 用 lark-cli 以用户身份发消息，这样其他机器人（如 Aily）能响应
+        let result: String
+        if receiveIDType == "chat_id" {
+            result = try await runLarkCLI(args: [
+                "im", "+messages-send", "--as", "user",
+                "--chat-id", receiveID,
+                "--text", message,
+            ])
+        } else if receiveIDType == "open_id" || receiveIDType == "user_id" {
+            result = try await runLarkCLI(args: [
+                "im", "+messages-send", "--as", "user",
+                "--user-id", receiveID,
+                "--text", message,
+            ])
+        } else {
+            // email 等其他类型，降级用 API
+            let contentJSON = try makeTextContentJSON(message)
+            let messageID = try await client.sendMessage(
+                receiveID: receiveID,
+                receiveIDType: receiveIDType,
+                msgType: "text",
+                content: contentJSON
+            )
+            return "Message sent successfully. message_id: \(messageID)"
+        }
 
-        let messageID = try await client.sendMessage(
-            receiveID: receiveID,
-            receiveIDType: receiveIDType,
-            msgType: "text",
-            content: contentJSON
-        )
-        return "Message sent successfully. message_id: \(messageID)"
+        if result.contains("\"ok\": true") || result.contains("\"ok\":true") {
+            return "Message sent successfully (as user). \(result)"
+        } else {
+            return "Error sending message: \(result)"
+        }
     }
 
     private func resolveContact(_ query: String) async throws -> ContactResolution {
@@ -299,3 +321,39 @@ private func makeTextContentJSON(_ text: String) throws -> String {
     }
     return json
 }
+
+/// 调用 lark-cli 命令行工具，返回 stdout 输出。
+private func runLarkCLI(args: [String]) async throws -> String {
+    try await withCheckedThrowingContinuation { continuation in
+        let process = Process()
+        let pipe = Pipe()
+
+        // lark-cli 安装在 npm global bin
+        let possiblePaths = [
+            "/usr/local/bin/lark-cli",
+            "/opt/homebrew/bin/lark-cli",
+            ProcessInfo.processInfo.environment["HOME"].map { "\($0)/.npm-global/bin/lark-cli" },
+        ].compactMap { $0 }
+
+        let execPath = possiblePaths.first { FileManager.default.fileExists(atPath: $0) }
+            ?? "/usr/local/bin/lark-cli"
+
+        process.executableURL = URL(fileURLWithPath: execPath)
+        process.arguments = args
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do {
+            try process.run()
+        } catch {
+            continuation.resume(throwing: FeishuError.apiFailed("Failed to launch lark-cli: \(error.localizedDescription)"))
+            return
+        }
+
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? ""
+        continuation.resume(returning: output)
+    }
+}
+

@@ -98,7 +98,8 @@ public enum FeishuContactStore {
 // MARK: - Feishu API client
 
 /// 飞书 Open Platform REST API 封装。
-/// 管理 tenant_access_token 自动刷新，提供发消息、查消息等原子操作。
+/// 支持 user_access_token（用户身份）和 tenant_access_token（机器人身份）两种模式。
+/// 优先使用 user_access_token 发消息，这样其他机器人（如 Aily）能响应。
 public actor FeishuClient {
     private let appID: String
     private let appSecret: String
@@ -107,16 +108,22 @@ public actor FeishuClient {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
+    private var refreshTokenValue: String?
+    private var cachedUserToken: String?
+    private var userTokenExpiresAt: Date = .distantPast
+
     private var cachedToken: String?
     private var tokenExpiresAt: Date = .distantPast
 
     public init(
         appID: String,
         appSecret: String,
+        refreshToken: String? = nil,
         baseURL: URL = VoiceAgentRuntimeConfig.feishuBaseURL
     ) {
         self.appID = appID
         self.appSecret = appSecret
+        self.refreshTokenValue = refreshToken
         self.baseURL = baseURL
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
@@ -128,15 +135,73 @@ public actor FeishuClient {
 
     // MARK: - Token management
 
+    /// 获取用于发消息的 token。优先 user_access_token，降级到 tenant_access_token。
+    public func accessToken() async throws -> String {
+        if refreshTokenValue != nil {
+            return try await userAccessToken()
+        }
+        return try await tenantAccessToken()
+    }
+
+    /// 获取有效的 user_access_token，过期用 refresh_token 续期。
+    private func userAccessToken() async throws -> String {
+        if let token = cachedUserToken, Date() < userTokenExpiresAt {
+            return token
+        }
+        return try await refreshUserToken()
+    }
+
+    private func refreshUserToken() async throws -> String {
+        guard let refreshToken = refreshTokenValue else {
+            throw FeishuError.missingCredentials
+        }
+
+        let url = baseURL.appendingPathComponent("authen/v2/oauth/token")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+
+        let body: [String: String] = [
+            "grant_type": "refresh_token",
+            "client_id": appID,
+            "client_secret": appSecret,
+            "refresh_token": refreshToken,
+        ]
+        request.httpBody = try encoder.encode(body)
+
+        let (data, response) = try await session.data(for: request)
+        try validateHTTPResponse(response, data: data)
+
+        let result = try decoder.decode(FeishuOAuthTokenResponse.self, from: data)
+        guard result.code == 0, let token = result.accessToken else {
+            throw FeishuError.authFailed(result.errorDescription ?? "Failed to refresh user token")
+        }
+
+        cachedUserToken = token
+        userTokenExpiresAt = Date().addingTimeInterval(TimeInterval(result.expiresIn ?? 7200) - 300)
+
+        // 更新 refresh_token（飞书可能会返回新的）
+        if let newRefreshToken = result.refreshToken, !newRefreshToken.isEmpty {
+            refreshTokenValue = newRefreshToken
+            VoiceAgentKeychain.saveToKeychain(
+                service: VoiceAgentRuntimeConfig.keychainService,
+                account: VoiceAgentRuntimeConfig.keychainFeishuRefreshTokenAccount,
+                value: newRefreshToken
+            )
+        }
+
+        return token
+    }
+
     /// 获取有效的 tenant_access_token，过期自动刷新。
     public func tenantAccessToken() async throws -> String {
         if let token = cachedToken, Date() < tokenExpiresAt {
             return token
         }
-        return try await refreshToken()
+        return try await refreshTenantToken()
     }
 
-    private func refreshToken() async throws -> String {
+    private func refreshTenantToken() async throws -> String {
         let url = baseURL.appendingPathComponent("auth/v3/tenant_access_token/internal")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -157,7 +222,6 @@ public actor FeishuClient {
         }
 
         cachedToken = token
-        // 提前 5 分钟刷新
         tokenExpiresAt = Date().addingTimeInterval(TimeInterval(result.expire ?? 7200) - 300)
         return token
     }
@@ -178,7 +242,7 @@ public actor FeishuClient {
         msgType: String = "text",
         content: String
     ) async throws -> String {
-        let token = try await tenantAccessToken()
+        let token = try await accessToken()
         var urlComponents = URLComponents(
             url: baseURL.appendingPathComponent("im/v1/messages"),
             resolvingAgainstBaseURL: false
@@ -416,6 +480,7 @@ public actor FeishuClient {
 
 public extension FeishuClient {
     /// 从 VoiceAgentRuntimeConfig 读取凭证创建客户端。
+    /// 如果有 refresh_token 则使用用户身份发消息。
     static func configured() -> FeishuClient? {
         guard
             let appID = VoiceAgentRuntimeConfig.feishuAppID,
@@ -423,7 +488,8 @@ public extension FeishuClient {
         else {
             return nil
         }
-        return FeishuClient(appID: appID, appSecret: appSecret)
+        let refreshToken = VoiceAgentRuntimeConfig.feishuRefreshToken
+        return FeishuClient(appID: appID, appSecret: appSecret, refreshToken: refreshToken)
     }
 }
 
@@ -452,6 +518,24 @@ public enum FeishuError: Error, LocalizedError {
 }
 
 // MARK: - API response models
+
+struct FeishuOAuthTokenResponse: Decodable {
+    let code: Int
+    let accessToken: String?
+    let expiresIn: Int?
+    let refreshToken: String?
+    let refreshTokenExpiresIn: Int?
+    let errorDescription: String?
+
+    enum CodingKeys: String, CodingKey {
+        case code
+        case accessToken = "access_token"
+        case expiresIn = "expires_in"
+        case refreshToken = "refresh_token"
+        case refreshTokenExpiresIn = "refresh_token_expires_in"
+        case errorDescription = "error_description"
+    }
+}
 
 struct FeishuTokenResponse: Decodable {
     let code: Int

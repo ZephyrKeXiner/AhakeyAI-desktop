@@ -13,6 +13,8 @@ public enum VoiceAgentRuntimeConfig {
     public static let modelEnvironmentVariable = "AHAKEY_OPENAI_MODEL"
     public static let keychainService = "com.ahakey.voiceagent"
     public static let keychainAPIKeyAccount = "openai-compatible-api-key"
+    public static let keychainBaseURLAccount = "openai-compatible-base-url"
+    public static let keychainModelAccount = "openai-compatible-model"
 
     // MARK: - Feishu / Lark
 
@@ -21,6 +23,7 @@ public enum VoiceAgentRuntimeConfig {
     public static let feishuContactsEnvironmentVariable = "AHAKEY_FEISHU_CONTACTS_JSON"
     public static let keychainFeishuAppIDAccount = "feishu-app-id"
     public static let keychainFeishuAppSecretAccount = "feishu-app-secret"
+    public static let keychainFeishuRefreshTokenAccount = "feishu-user-refresh-token"
     public static let feishuBaseURL = URL(string: "https://open.feishu.cn/open-apis")!
 
     public static let defaultOpenAIBaseURL = URL(string: "https://api.openai-next.com/v1")!
@@ -41,15 +44,19 @@ public enum VoiceAgentRuntimeConfig {
     public static func openAIBaseURL(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> URL {
-        guard
-            let rawValue = nonEmpty(environment[baseURLEnvironmentVariable]),
-            let url = URL(string: rawValue),
-            url.scheme != nil,
-            url.host != nil
-        else {
-            return defaultOpenAIBaseURL
+        // 优先环境变量
+        if let rawValue = nonEmpty(environment[baseURLEnvironmentVariable]),
+           let url = URL(string: rawValue),
+           url.scheme != nil, url.host != nil {
+            return url
         }
-        return url
+        // 其次 Keychain
+        if let rawValue = VoiceAgentKeychain.openAIAPIKey(service: keychainService, account: keychainBaseURLAccount),
+           let url = URL(string: rawValue),
+           url.scheme != nil, url.host != nil {
+            return url
+        }
+        return defaultOpenAIBaseURL
     }
 
     public static func openAIAPIKey(
@@ -72,7 +79,14 @@ public enum VoiceAgentRuntimeConfig {
     public static func openAIModel(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> String {
-        nonEmpty(environment[modelEnvironmentVariable]) ?? defaultModel
+        if let envModel = nonEmpty(environment[modelEnvironmentVariable]) {
+            return envModel
+        }
+        if let keychainModel = VoiceAgentKeychain.openAIAPIKey(service: keychainService, account: keychainModelAccount),
+           !keychainModel.isEmpty {
+            return keychainModel
+        }
+        return defaultModel
     }
 
     // MARK: - Feishu accessors
@@ -117,6 +131,13 @@ public enum VoiceAgentRuntimeConfig {
         )
     }
 
+    public static var feishuRefreshToken: String? {
+        VoiceAgentKeychain.openAIAPIKey(
+            service: keychainService,
+            account: keychainFeishuRefreshTokenAccount
+        )
+    }
+
     public static func feishuContactsJSON(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> String? {
@@ -130,7 +151,7 @@ public enum VoiceAgentRuntimeConfig {
     }
 }
 
-/// 从 macOS Keychain 读取 OpenAI 兼容 API key 的轻封装。
+/// macOS Keychain 读写封装。
 public enum VoiceAgentKeychain {
     public static func openAIAPIKey(service: String, account: String) -> String? {
         #if canImport(Security)
@@ -154,6 +175,35 @@ public enum VoiceAgentKeychain {
         return trimmed.isEmpty ? nil : trimmed
         #else
         return nil
+        #endif
+    }
+
+    @discardableResult
+    public static func saveToKeychain(service: String, account: String, value: String) -> Bool {
+        #if canImport(Security)
+        guard let data = value.data(using: .utf8) else { return false }
+
+        // 先尝试更新
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+        ]
+        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return true
+        }
+
+        // 不存在则添加
+        var addQuery = query
+        addQuery[kSecValueData as String] = data
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        return addStatus == errSecSuccess
+        #else
+        return false
         #endif
     }
 }
