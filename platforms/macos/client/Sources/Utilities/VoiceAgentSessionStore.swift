@@ -8,7 +8,7 @@ func makeDefaultVoiceAssistantModel() -> VoiceAssistantModel {
 }
 
 private func defaultVoiceSubAgents() -> [VoiceSubAgent] {
-    [VoiceSubAgent.feishuMessenger()].compactMap { $0 }
+    [VoiceSubAgent.feishuMessenger()]
 }
 
 @MainActor
@@ -69,11 +69,10 @@ final class VoiceAgentSessionStore: ObservableObject {
         selectedRunID = nil
     }
 
-    /// 重新加载飞书 subagent（凭证变更后调用）。
+    /// 重新加载飞书 subagent（联系人变更后调用）。
     func reloadFeishuSubAgent() async {
-        if let feishu = VoiceSubAgent.feishuMessenger() {
-            await assistantModel.registerSubAgent(feishu)
-        }
+        let feishu = VoiceSubAgent.feishuMessenger()
+        await assistantModel.registerSubAgent(feishu)
     }
 
     /// 重建整个 VoiceAgent session（LLM 配置变更后调用）。

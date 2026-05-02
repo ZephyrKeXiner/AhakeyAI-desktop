@@ -3,6 +3,7 @@ import Foundation
 // MARK: - Send Message Tool
 
 /// 飞书发消息工具：支持按预指定联系人名字或直接用 ID 发送。
+/// 通过 lark-cli 以用户身份发送，无需 App 自身存储飞书凭证。
 public struct FeishuSendMessageTool: VoiceAgentTool {
     public let name = "feishu_send_message"
     public let description = """
@@ -17,7 +18,7 @@ public struct FeishuSendMessageTool: VoiceAgentTool {
         "properties": .object([
             "contact": .object([
                 "type": .string("string"),
-                "description": .string("Contact name/alias/email/mobile/direct ID. The tool resolves local aliases first, then searches Feishu contacts."),
+                "description": .string("Contact name/alias/email/mobile/direct ID. Resolves local aliases."),
             ]),
             "receive_id": .object([
                 "type": .string("string"),
@@ -36,11 +37,9 @@ public struct FeishuSendMessageTool: VoiceAgentTool {
         "required": .array([.string("message")]),
     ])
 
-    private let client: FeishuClient
     private let contactBook: FeishuContactBook
 
-    public init(client: FeishuClient, contacts: [FeishuContact] = []) {
-        self.client = client
+    public init(contacts: [FeishuContact] = []) {
         self.contactBook = FeishuContactBook(contacts: contacts)
     }
 
@@ -56,7 +55,7 @@ public struct FeishuSendMessageTool: VoiceAgentTool {
         let receiveIDType: String
 
         if let contactName = args["contact"] {
-            let resolved = try await resolveContact(contactName)
+            let resolved = resolveContact(contactName)
             switch resolved {
             case let .single(contact):
                 receiveID = contact.id
@@ -64,7 +63,7 @@ public struct FeishuSendMessageTool: VoiceAgentTool {
             case let .multiple(matches):
                 return "Error: multiple contacts matched '\(contactName)'. Specify one of:\n\(renderContacts(matches))"
             case .none:
-                return "Error: contact '\(contactName)' not found in local aliases or Feishu contacts. Provide receive_id directly."
+                return "Error: contact '\(contactName)' not found in local contacts. Provide receive_id directly."
             }
         } else if let directID = args["receive_id"] {
             receiveID = directID
@@ -73,7 +72,7 @@ public struct FeishuSendMessageTool: VoiceAgentTool {
             return "Error: provide either 'contact' name or 'receive_id'."
         }
 
-        // 用 lark-cli 以用户身份发消息，这样其他机器人（如 Aily）能响应
+        // 用 lark-cli 以用户身份发消息
         let result: String
         if receiveIDType == "chat_id" {
             result = try await runLarkCLI(args: [
@@ -88,25 +87,22 @@ public struct FeishuSendMessageTool: VoiceAgentTool {
                 "--text", message,
             ])
         } else {
-            // email 等其他类型，降级用 API
-            let contentJSON = try makeTextContentJSON(message)
-            let messageID = try await client.sendMessage(
-                receiveID: receiveID,
-                receiveIDType: receiveIDType,
-                msgType: "text",
-                content: contentJSON
-            )
-            return "Message sent successfully. message_id: \(messageID)"
+            // email: 转成 lark-cli 格式
+            result = try await runLarkCLI(args: [
+                "im", "+messages-send", "--as", "user",
+                "--email", receiveID,
+                "--text", message,
+            ])
         }
 
-        if result.contains("\"ok\": true") || result.contains("\"ok\":true") {
+        if result.contains("\"ok\": true") || result.contains("\"ok\":true") || result.contains("message_id") {
             return "Message sent successfully (as user). \(result)"
         } else {
             return "Error sending message: \(result)"
         }
     }
 
-    private func resolveContact(_ query: String) async throws -> ContactResolution {
+    private func resolveContact(_ query: String) -> ContactResolution {
         let localMatches = contactBook.matches(query)
         if localMatches.count == 1 {
             return .single(localMatches[0])
@@ -114,87 +110,19 @@ public struct FeishuSendMessageTool: VoiceAgentTool {
         if localMatches.count > 1 {
             return .multiple(localMatches)
         }
-
-        let remoteMatches = try await client.searchContacts(query: query)
-        if remoteMatches.count == 1 {
-            return .single(remoteMatches[0])
-        }
-        if remoteMatches.count > 1 {
-            return .multiple(remoteMatches)
-        }
         return .none
-    }
-}
-
-// MARK: - List Messages Tool
-
-/// 读取飞书群聊历史消息。
-public struct FeishuListMessagesTool: VoiceAgentTool {
-    public let name = "feishu_list_messages"
-    public let description = """
-        List recent messages from a Feishu/Lark group chat. \
-        Requires a chat_id. Returns the most recent messages.
-        """
-
-    public let parameters: JSONValue = .object([
-        "type": .string("object"),
-        "properties": .object([
-            "chat_id": .object([
-                "type": .string("string"),
-                "description": .string("The Feishu chat ID to read messages from."),
-            ]),
-            "count": .object([
-                "type": .string("integer"),
-                "description": .string("Number of messages to fetch (default 10, max 50)."),
-            ]),
-        ]),
-        "required": .array([.string("chat_id")]),
-    ])
-
-    private let client: FeishuClient
-
-    public init(client: FeishuClient) {
-        self.client = client
-    }
-
-    public func call(input: String, context: VoiceAgentToolContext) async throws -> String {
-        let args = try parseJSON(input)
-
-        guard let chatID = args["chat_id"], !chatID.isEmpty else {
-            return "Error: chat_id is required."
-        }
-
-        let count = Int(args["count"] ?? "10") ?? 10
-        let (messages, _) = try await client.listMessages(
-            containerID: chatID,
-            pageSize: min(count, 50)
-        )
-
-        if messages.isEmpty {
-            return "No messages found in this chat."
-        }
-
-        var lines: [String] = ["Found \(messages.count) message(s):"]
-        for msg in messages {
-            let sender = msg.sender?.id ?? "unknown"
-            let senderType = msg.sender?.senderType ?? "unknown"
-            let content = msg.body?.content ?? "(no content)"
-            let time = msg.createTime ?? ""
-            lines.append("[\(time)] \(senderType):\(sender) — \(content)")
-        }
-        return lines.joined(separator: "\n")
     }
 }
 
 // MARK: - Lookup Contact Tool
 
-/// 查询预指定联系人信息。
+/// 查询联系人：先查本地预配置，再用 lark-cli 搜群聊和通讯录。
 public struct FeishuLookupContactTool: VoiceAgentTool {
     public let name = "feishu_lookup_contact"
     public let description = """
-        Look up a Feishu contact by name/alias/email/mobile/direct ID. \
-        Resolves local aliases first, then searches Feishu contacts. \
-        Returns the ID and type so you can send a message.
+        Look up a Feishu contact or group chat by name. \
+        Checks local pre-configured contacts first, then searches Feishu via lark-cli \
+        (group chats and user directory). Returns the ID and type for sending messages.
         """
 
     public let parameters: JSONValue = .object([
@@ -202,46 +130,89 @@ public struct FeishuLookupContactTool: VoiceAgentTool {
         "properties": .object([
             "name": .object([
                 "type": .string("string"),
-                "description": .string("Contact name to look up (case-insensitive)."),
+                "description": .string("Contact or group chat name to look up."),
             ]),
         ]),
         "required": .array([.string("name")]),
     ])
 
-    private let client: FeishuClient
     private let contactBook: FeishuContactBook
 
-    public init(client: FeishuClient, contacts: [FeishuContact]) {
-        self.client = client
+    public init(contacts: [FeishuContact]) {
         self.contactBook = FeishuContactBook(contacts: contacts)
     }
 
     public func call(input: String, context: VoiceAgentToolContext) async throws -> String {
         let args = try parseJSON(input)
 
-        if let name = args["name"], !name.isEmpty {
-            let localMatches = contactBook.matches(name)
-            if localMatches.count == 1 {
-                return "Found local contact: \(renderContact(localMatches[0]))"
+        guard let name = args["name"], !name.isEmpty else {
+            if contactBook.contacts.isEmpty {
+                return "No local contacts configured. Provide a name to search Feishu."
             }
-            if localMatches.count > 1 {
-                return "Multiple local contacts matched '\(name)':\n\(renderContacts(localMatches))"
-            }
-
-            let remoteMatches = try await client.searchContacts(query: name)
-            if remoteMatches.count == 1 {
-                return "Found Feishu contact: \(renderContact(remoteMatches[0]))"
-            }
-            if remoteMatches.count > 1 {
-                return "Multiple Feishu contacts matched '\(name)':\n\(renderContacts(remoteMatches))"
-            }
+            return "Available local contacts:\n\(renderContacts(contactBook.contacts))"
         }
 
-        // 列出所有联系人
-        if contactBook.contacts.isEmpty {
-            return "No local contacts configured. Provide a name/email/mobile and I will search Feishu contacts."
+        // 1. 先查本地
+        let localMatches = contactBook.matches(name)
+        if localMatches.count == 1 {
+            return "Found local contact: \(renderContact(localMatches[0]))"
         }
-        return "Available local contacts:\n\(renderContacts(contactBook.contacts))"
+        if localMatches.count > 1 {
+            return "Multiple local contacts matched '\(name)':\n\(renderContacts(localMatches))"
+        }
+
+        // 2. 用 lark-cli 搜群聊
+        let chatResult = try await runLarkCLI(args: [
+            "im", "+chat-search", "--as", "user",
+            "--query", name, "--page-size", "5", "--format", "json",
+        ])
+        let chatMatches = parseChatSearchResult(chatResult)
+        if !chatMatches.isEmpty {
+            return "Found group chat(s):\n\(renderContacts(chatMatches))"
+        }
+
+        // 3. 用 lark-cli 搜联系人
+        let userResult = try await runLarkCLI(args: [
+            "contact", "+search-user", "--as", "user",
+            "--query", name, "--page-size", "5", "--format", "json",
+        ])
+        let userMatches = parseUserSearchResult(userResult)
+        if !userMatches.isEmpty {
+            return "Found user(s):\n\(renderContacts(userMatches))"
+        }
+
+        return "No results for '\(name)'. Try a different keyword, or use a direct Feishu ID."
+    }
+
+    private func parseChatSearchResult(_ json: String) -> [FeishuContact] {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ok = obj["ok"] as? Bool, ok,
+              let resultData = obj["data"] as? [String: Any],
+              let chats = resultData["chats"] as? [[String: Any]]
+        else { return [] }
+
+        return chats.compactMap { chat in
+            guard let chatID = chat["chat_id"] as? String,
+                  let chatName = chat["name"] as? String
+            else { return nil }
+            return FeishuContact(name: chatName, id: chatID, idType: .chatID)
+        }
+    }
+
+    private func parseUserSearchResult(_ json: String) -> [FeishuContact] {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ok = obj["ok"] as? Bool, ok,
+              let resultData = obj["data"] as? [String: Any],
+              let users = resultData["users"] as? [[String: Any]]
+        else { return [] }
+
+        return users.compactMap { user in
+            guard let openID = user["open_id"] as? String else { return nil }
+            let name = (user["name"] as? String) ?? (user["en_name"] as? String) ?? openID
+            return FeishuContact(name: name, id: openID, idType: .openID)
+        }
     }
 }
 
@@ -314,12 +285,25 @@ private func parseJSON(_ input: String) throws -> [String: String] {
     return result
 }
 
-private func makeTextContentJSON(_ text: String) throws -> String {
-    let data = try JSONSerialization.data(withJSONObject: ["text": text], options: [])
-    guard let json = String(data: data, encoding: .utf8) else {
-        throw FeishuError.invalidResponse
+/// 查找 lark-cli 可执行文件路径。优先 app bundle 内置，其次系统 PATH。
+func findLarkCLIPath() -> String? {
+    var paths: [String] = []
+
+    // 优先 app bundle 内置的 lark-cli
+    if let bundlePath = Bundle.main.executableURL?
+        .deletingLastPathComponent()
+        .appendingPathComponent("lark-cli").path,
+       FileManager.default.fileExists(atPath: bundlePath) {
+        paths.insert(bundlePath, at: 0)
     }
-    return json
+
+    paths += [
+        "/usr/local/bin/lark-cli",
+        "/opt/homebrew/bin/lark-cli",
+        ProcessInfo.processInfo.environment["HOME"].map { "\($0)/.npm-global/bin/lark-cli" },
+    ].compactMap { $0 }
+
+    return paths.first { FileManager.default.fileExists(atPath: $0) }
 }
 
 /// 调用 lark-cli 命令行工具，返回 stdout 输出。
@@ -328,15 +312,10 @@ private func runLarkCLI(args: [String]) async throws -> String {
         let process = Process()
         let pipe = Pipe()
 
-        // lark-cli 安装在 npm global bin
-        let possiblePaths = [
-            "/usr/local/bin/lark-cli",
-            "/opt/homebrew/bin/lark-cli",
-            ProcessInfo.processInfo.environment["HOME"].map { "\($0)/.npm-global/bin/lark-cli" },
-        ].compactMap { $0 }
-
-        let execPath = possiblePaths.first { FileManager.default.fileExists(atPath: $0) }
-            ?? "/usr/local/bin/lark-cli"
+        guard let execPath = findLarkCLIPath() else {
+            continuation.resume(throwing: FeishuError.apiFailed("lark-cli not found. Please ensure it is bundled with the app or installed on your system."))
+            return
+        }
 
         process.executableURL = URL(fileURLWithPath: execPath)
         process.arguments = args

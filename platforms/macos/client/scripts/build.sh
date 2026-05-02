@@ -22,14 +22,16 @@ LAUNCH_AFTER_INSTALL="${LAUNCH_AFTER_INSTALL:-0}"
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 REQUIRE_DEVELOPER_ID="${REQUIRE_DEVELOPER_ID:-0}"
 DEST_APP="$INSTALL_DIR/$APP_BUNDLE_NAME.app"
+BUILD_ARCH="${BUILD_ARCH:-$(uname -m)}"
+MIN_SYSTEM_VERSION="${MIN_SYSTEM_VERSION:-14.0}"
 
 echo "📦 Building $APP_DISPLAY_NAME..."
 cd "$APP_ROOT"
-swift build -c release --arch arm64 --product AhaKeyConfig
-swift build -c release --arch arm64 --product ahakeyconfig-agent
+swift build -c release --arch "$BUILD_ARCH" --product AhaKeyConfig
+swift build -c release --arch "$BUILD_ARCH" --product ahakeyconfig-agent
 
-BUILD_OUTPUT=".build/arm64-apple-macosx/release/$EXECUTABLE_NAME"
-AGENT_OUTPUT=".build/arm64-apple-macosx/release/ahakeyconfig-agent"
+BUILD_OUTPUT=".build/$BUILD_ARCH-apple-macosx/release/$EXECUTABLE_NAME"
+AGENT_OUTPUT=".build/$BUILD_ARCH-apple-macosx/release/ahakeyconfig-agent"
 if [[ ! -f "$BUILD_OUTPUT" ]]; then
   echo "Build output not found at $BUILD_OUTPUT"
   exit 1
@@ -55,6 +57,30 @@ iconutil -c icns "$ICONSET_DIR" -o "$ICNS_PATH"
 cp "$BUILD_OUTPUT" "$APP_EXECUTABLE"
 cp "$AGENT_OUTPUT" "$AGENT_EXECUTABLE"
 cp "$ICNS_PATH" "$APP_BUNDLE/Contents/Resources/AhaKeyConfig.icns"
+
+# 内置 lark-cli 二进制（从 npm global 或已知路径拷贝）
+LARK_CLI_BINARY=""
+LARK_CLI_CANDIDATES=(
+  "$HOME/.npm-global/lib/node_modules/@larksuite/cli/bin/lark-cli"
+  "/usr/local/lib/node_modules/@larksuite/cli/bin/lark-cli"
+  "/opt/homebrew/lib/node_modules/@larksuite/cli/bin/lark-cli"
+  "/usr/local/bin/lark-cli"
+  "/opt/homebrew/bin/lark-cli"
+)
+for candidate in "${LARK_CLI_CANDIDATES[@]}"; do
+  if [[ -f "$candidate" ]]; then
+    LARK_CLI_BINARY="$candidate"
+    break
+  fi
+done
+
+if [[ -n "$LARK_CLI_BINARY" ]]; then
+  echo "📎 Bundling lark-cli from: $LARK_CLI_BINARY"
+  cp "$LARK_CLI_BINARY" "$APP_BUNDLE/Contents/MacOS/lark-cli"
+  chmod +x "$APP_BUNDLE/Contents/MacOS/lark-cli"
+else
+  echo "⚠️  lark-cli binary not found, skipping bundle (Feishu integration won't work without it)"
+fi
 
 BUILD_NUMBER="$(git -C "$APP_ROOT/../.." rev-list --count HEAD 2>/dev/null || echo 1)"
 
@@ -84,7 +110,7 @@ cat > "$INFO_PLIST" <<PLIST
   <key>CFBundleVersion</key>
   <string>${BUILD_NUMBER}</string>
   <key>LSMinimumSystemVersion</key>
-  <string>15.0</string>
+  <string>${MIN_SYSTEM_VERSION}</string>
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>AhaKey 配置需要蓝牙连接你的 AhaKey 键盘。</string>
   <key>NSMicrophoneUsageDescription</key>
@@ -139,11 +165,17 @@ if [[ -n "${SIGNING_IDENTITY}" ]]; then
 
   codesign "${SIGN_ARGS[@]}" "$APP_EXECUTABLE"
   codesign "${SIGN_ARGS[@]}" "$AGENT_EXECUTABLE"
+  if [[ -f "$APP_BUNDLE/Contents/MacOS/lark-cli" ]]; then
+    codesign "${SIGN_ARGS[@]}" "$APP_BUNDLE/Contents/MacOS/lark-cli"
+  fi
   codesign "${SIGN_ARGS[@]}" --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
 else
   echo "🧪 No signing identity found, using ad-hoc signature for local testing"
   codesign --force --sign - "$APP_EXECUTABLE"
   codesign --force --sign - "$AGENT_EXECUTABLE"
+  if [[ -f "$APP_BUNDLE/Contents/MacOS/lark-cli" ]]; then
+    codesign --force --sign - "$APP_BUNDLE/Contents/MacOS/lark-cli"
+  fi
   codesign --force --sign - "$APP_BUNDLE"
 fi
 
