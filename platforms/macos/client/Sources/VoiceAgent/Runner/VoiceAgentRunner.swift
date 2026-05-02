@@ -2,6 +2,7 @@ import Foundation
 
 public typealias VoiceAgentToolHandler = @Sendable (String) async throws -> String
 public typealias VoiceAgentEventCallback = @Sendable (String) async -> Void
+public typealias VoiceAgentRunEventCallback = @Sendable (VoiceAgentRunEvent) async -> Void
 
 private struct SubAgentArgs: Sendable {
     var systemPrompt: String
@@ -100,6 +101,13 @@ private extension String {
         guard let first = trimmed.first else { return false }
         return first == "{" || first == "[" || first == "\""
     }
+
+    var voiceAgentRunTitle: String {
+        let compact = trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: " ")
+        guard compact.count > 80 else { return compact.isEmpty ? "Untitled run" : compact }
+        return "\(String(compact.prefix(80)))..."
+    }
 }
 
 /// Coda-style agentic runner: 由 LLM 自行决定何时调用工具（包括派生子 agent）。
@@ -115,7 +123,9 @@ public actor VoiceAgentRunner {
     private let tools: [OpenAIToolDefinition]
     private let toolHandlers: [String: VoiceAgentToolHandler]
     private let onEvent: VoiceAgentEventCallback?
+    private let onRunEvent: VoiceAgentRunEventCallback?
     private let limiter: ConcurrencyLimiter
+    private let runRegistry: VoiceAgentRunRegistry
     private var messages: [VoiceAgentMessage]
 
     public init(
@@ -125,7 +135,9 @@ public actor VoiceAgentRunner {
         tools: [OpenAIToolDefinition] = [],
         toolHandlers: [String: VoiceAgentToolHandler] = [:],
         options: VoiceAgentOptions = VoiceAgentOptions(),
-        onEvent: VoiceAgentEventCallback? = nil
+        onEvent: VoiceAgentEventCallback? = nil,
+        onRunEvent: VoiceAgentRunEventCallback? = nil,
+        runRegistry: VoiceAgentRunRegistry = VoiceAgentRunRegistry()
     ) {
         self.client = client
         self.model = model
@@ -133,7 +145,9 @@ public actor VoiceAgentRunner {
         self.tools = tools
         self.toolHandlers = toolHandlers
         self.onEvent = onEvent
+        self.onRunEvent = onRunEvent
         self.limiter = ConcurrencyLimiter(limit: Self.maxConcurrentCalls)
+        self.runRegistry = runRegistry
         self.messages = [.system(systemPrompt)]
     }
 
@@ -143,27 +157,65 @@ public actor VoiceAgentRunner {
         var working = messages
         working.append(.user(userText))
         var remainingSubagentCalls = Self.maxSubagentCallsPerRun
-        let result = try await Self.runAgent(
-            messages: &working,
-            model: model,
-            client: client,
-            tools: tools,
-            toolHandlers: toolHandlers,
-            options: options,
+
+        let rootRunID = UUID()
+        let rootSnapshot = await runRegistry.startRun(
+            runID: rootRunID,
+            kind: .root,
+            title: userText.voiceAgentRunTitle,
+            parentRunID: nil,
+            rootRunID: rootRunID,
             depth: 0,
-            remainingSubagentCalls: &remainingSubagentCalls,
-            limiter: limiter,
-            onEvent: onEvent
+            messages: working
         )
-        messages = working
-        return result
+        await Self.emit(.runStarted(rootSnapshot), onEvent: onEvent, onRunEvent: onRunEvent)
+
+        do {
+            let result = try await Self.runAgent(
+                messages: &working,
+                model: model,
+                client: client,
+                tools: tools,
+                toolHandlers: toolHandlers,
+                options: options,
+                runID: rootRunID,
+                rootRunID: rootRunID,
+                depth: 0,
+                remainingSubagentCalls: &remainingSubagentCalls,
+                limiter: limiter,
+                runRegistry: runRegistry,
+                onEvent: onEvent,
+                onRunEvent: onRunEvent
+            )
+            messages = working
+            await runRegistry.completeRun(rootRunID, output: result)
+            await Self.emit(.runCompleted(runID: rootRunID, output: result), onEvent: onEvent, onRunEvent: onRunEvent)
+            return result
+        } catch {
+            await runRegistry.failRun(rootRunID, error: error.localizedDescription)
+            await Self.emit(.runFailed(runID: rootRunID, error: error.localizedDescription), onEvent: onEvent, onRunEvent: onRunEvent)
+            throw error
+        }
     }
 
     public func history() -> [VoiceAgentMessage] { messages }
 
-    public func reset() {
+    public func runSnapshots() async -> [VoiceAgentRunSnapshot] {
+        await runRegistry.snapshots()
+    }
+
+    public func liveRuns() async -> [VoiceAgentRunSnapshot] {
+        await runRegistry.snapshots()
+    }
+
+    public func runSnapshot(runID: UUID) async -> VoiceAgentRunSnapshot? {
+        await runRegistry.snapshot(runID: runID)
+    }
+
+    public func reset() async {
         let sys = messages.first
         messages = sys.map { [$0] } ?? []
+        await runRegistry.reset()
     }
 
     // MARK: - Recursive agent loop
@@ -175,10 +227,14 @@ public actor VoiceAgentRunner {
         tools: [OpenAIToolDefinition],
         toolHandlers: [String: VoiceAgentToolHandler],
         options: VoiceAgentOptions,
+        runID: UUID,
+        rootRunID: UUID,
         depth: Int,
         remainingSubagentCalls: inout Int,
         limiter: ConcurrencyLimiter,
-        onEvent: VoiceAgentEventCallback?
+        runRegistry: VoiceAgentRunRegistry,
+        onEvent: VoiceAgentEventCallback?,
+        onRunEvent: VoiceAgentRunEventCallback?
     ) async throws -> String {
         while true {
             let allTools = depth == 0 && remainingSubagentCalls > 0
@@ -205,6 +261,8 @@ public actor VoiceAgentRunner {
             await limiter.release()
 
             messages.append(response)
+            await runRegistry.appendMessage(response, to: runID)
+            await emit(.messageAppended(runID: runID, message: response), onEvent: onEvent, onRunEvent: onRunEvent)
 
             guard let toolCalls = response.toolCalls, !toolCalls.isEmpty else {
                 return response.content
@@ -216,7 +274,14 @@ public actor VoiceAgentRunner {
             )
             let requestedSubagentCount = toolCalls.filter { $0.function.name == "subagent" }.count
             if requestedSubagentCount > allowedSubagentToolCallIDs.count {
-                await onEvent?("[subagent] skipped \(requestedSubagentCount - allowedSubagentToolCallIDs.count) call(s): budget exhausted")
+                await emit(
+                    .notice(
+                        runID: runID,
+                        message: "[subagent] skipped \(requestedSubagentCount - allowedSubagentToolCallIDs.count) call(s): budget exhausted"
+                    ),
+                    onEvent: onEvent,
+                    onRunEvent: onRunEvent
+                )
             }
 
             // Execute all tool calls in parallel (bounded by limiter);
@@ -230,13 +295,24 @@ public actor VoiceAgentRunner {
                     let id = toolCall.id
 
                     group.addTask {
+                        let startedToolCall = await runRegistry.startToolCall(
+                            callID: id,
+                            name: name,
+                            arguments: args,
+                            in: runID
+                        )
+                        await emit(.toolStarted(runID: runID, toolCall: startedToolCall), onEvent: onEvent, onRunEvent: onRunEvent)
+
                         do {
                             let output: String
+                            var status: VoiceAgentToolCallStatus = .completed
                             if name == "subagent" {
                                 if depth != 0 {
                                     output = "Error: subagent delegation is only available to the root agent. Complete this task directly instead of delegating again."
+                                    status = .skipped
                                 } else if !allowedSubagentToolCallIDs.contains(id) {
                                     output = "Error: subagent budget exceeded. Use the existing context and completed subagent results to synthesize the answer."
+                                    status = .skipped
                                 } else {
                                     output = try await handleSubagent(
                                         args,
@@ -245,21 +321,51 @@ public actor VoiceAgentRunner {
                                         tools: tools,
                                         toolHandlers: toolHandlers,
                                         options: options,
+                                        parentRunID: runID,
+                                        rootRunID: rootRunID,
                                         depth: depth,
                                         limiter: limiter,
-                                        onEvent: onEvent
+                                        runRegistry: runRegistry,
+                                        onEvent: onEvent,
+                                        onRunEvent: onRunEvent
                                     )
                                 }
                             } else if let handler = toolHandlers[name] {
-                                await onEvent?("[tool] \(name)")
                                 output = try await handler(args)
                             } else {
                                 output = "Error: unknown tool '\(name)'"
+                                status = .failed
+                            }
+                            if let finishedToolCall = await runRegistry.finishToolCall(
+                                callID: id,
+                                in: runID,
+                                status: status,
+                                output: output,
+                                error: status == .failed ? output : nil
+                            ) {
+                                await emit(
+                                    .toolFinished(runID: runID, toolCall: finishedToolCall),
+                                    onEvent: onEvent,
+                                    onRunEvent: onRunEvent
+                                )
                             }
                             return (id, output)
                         } catch {
-                            await onEvent?("[error] tool \(name) failed: \(error.localizedDescription)")
-                            return (id, "Error: \(error.localizedDescription)")
+                            let output = "Error: \(error.localizedDescription)"
+                            if let finishedToolCall = await runRegistry.finishToolCall(
+                                callID: id,
+                                in: runID,
+                                status: .failed,
+                                output: output,
+                                error: error.localizedDescription
+                            ) {
+                                await emit(
+                                    .toolFinished(runID: runID, toolCall: finishedToolCall),
+                                    onEvent: onEvent,
+                                    onRunEvent: onRunEvent
+                                )
+                            }
+                            return (id, output)
                         }
                     }
                 }
@@ -271,7 +377,10 @@ public actor VoiceAgentRunner {
             // Append results in original tool_calls order
             for toolCall in toolCalls {
                 if let r = toolResults.first(where: { $0.id == toolCall.id }) {
-                    messages.append(.tool(r.output, toolCallID: r.id))
+                    let toolMessage = VoiceAgentMessage.tool(r.output, toolCallID: r.id)
+                    messages.append(toolMessage)
+                    await runRegistry.appendMessage(toolMessage, to: runID)
+                    await emit(.messageAppended(runID: runID, message: toolMessage), onEvent: onEvent, onRunEvent: onRunEvent)
                 }
             }
         }
@@ -296,34 +405,71 @@ public actor VoiceAgentRunner {
         tools: [OpenAIToolDefinition],
         toolHandlers: [String: VoiceAgentToolHandler],
         options: VoiceAgentOptions,
+        parentRunID: UUID,
+        rootRunID: UUID,
         depth: Int,
         limiter: ConcurrencyLimiter,
-        onEvent: VoiceAgentEventCallback?
+        runRegistry: VoiceAgentRunRegistry,
+        onEvent: VoiceAgentEventCallback?,
+        onRunEvent: VoiceAgentRunEventCallback?
     ) async throws -> String {
         guard depth + 1 <= maxDepth else {
             return "Error: max sub-agent depth (\(maxDepth)) exceeded"
         }
 
         let parsed = try SubAgentArgs.parse(arguments)
-        await onEvent?("[subagent depth=\(depth + 1)] \(String(parsed.prompt.prefix(80)))...")
 
         var subMessages: [VoiceAgentMessage] = [
             .system(parsed.systemPrompt),
             .user(parsed.prompt),
         ]
-        var childSubagentBudget = 0
-        return try await runAgent(
-            messages: &subMessages,
-            model: model,
-            client: client,
-            tools: tools,
-            toolHandlers: toolHandlers,
-            options: options,
+        let childRunID = UUID()
+        let childSnapshot = await runRegistry.startRun(
+            runID: childRunID,
+            kind: .subagent,
+            title: parsed.prompt.voiceAgentRunTitle,
+            parentRunID: parentRunID,
+            rootRunID: rootRunID,
             depth: depth + 1,
-            remainingSubagentCalls: &childSubagentBudget,
-            limiter: limiter,
-            onEvent: onEvent
+            messages: subMessages
         )
+        await emit(.runStarted(childSnapshot), onEvent: onEvent, onRunEvent: onRunEvent)
+
+        var childSubagentBudget = 0
+        do {
+            let output = try await runAgent(
+                messages: &subMessages,
+                model: model,
+                client: client,
+                tools: tools,
+                toolHandlers: toolHandlers,
+                options: options,
+                runID: childRunID,
+                rootRunID: rootRunID,
+                depth: depth + 1,
+                remainingSubagentCalls: &childSubagentBudget,
+                limiter: limiter,
+                runRegistry: runRegistry,
+                onEvent: onEvent,
+                onRunEvent: onRunEvent
+            )
+            await runRegistry.completeRun(childRunID, output: output)
+            await emit(.runCompleted(runID: childRunID, output: output), onEvent: onEvent, onRunEvent: onRunEvent)
+            return output
+        } catch {
+            await runRegistry.failRun(childRunID, error: error.localizedDescription)
+            await emit(.runFailed(runID: childRunID, error: error.localizedDescription), onEvent: onEvent, onRunEvent: onRunEvent)
+            throw error
+        }
+    }
+
+    private static func emit(
+        _ event: VoiceAgentRunEvent,
+        onEvent: VoiceAgentEventCallback?,
+        onRunEvent: VoiceAgentRunEventCallback?
+    ) async {
+        await onRunEvent?(event)
+        await onEvent?(event.displayText)
     }
 
     private static let subagentToolDefinition = OpenAIToolDefinition(
@@ -354,7 +500,8 @@ public extension VoiceAgentRunner {
         tools: [OpenAIToolDefinition] = [],
         toolHandlers: [String: VoiceAgentToolHandler] = [:],
         options: VoiceAgentOptions = VoiceAgentOptions(),
-        onEvent: VoiceAgentEventCallback? = nil
+        onEvent: VoiceAgentEventCallback? = nil,
+        onRunEvent: VoiceAgentRunEventCallback? = nil
     ) -> VoiceAgentRunner {
         VoiceAgentRunner(
             model: VoiceAgentRuntimeConfig.openAIModel,
@@ -363,7 +510,8 @@ public extension VoiceAgentRunner {
             tools: tools,
             toolHandlers: toolHandlers,
             options: options,
-            onEvent: onEvent
+            onEvent: onEvent,
+            onRunEvent: onRunEvent
         )
     }
 }

@@ -10,8 +10,9 @@ import VoiceAgent
 /// - `isThinking`：调用中状态；
 /// - `lastError`：上次失败描述。
 ///
-/// runner 内部的工具事件以 `AsyncStream<String>` 形式暴露给 `events`，便于在
-/// 调试面板做实时回显，但不阻塞 UI 主流程。
+/// runner 内部事件同时暴露为字符串流与结构化 run event 流：
+/// - `events`：兼容旧调试输出；
+/// - `runEvents`：用于实时 run tree / subagent 面板。
 @MainActor
 public final class Agent: ObservableObject {
     public struct ChatMessage: Identifiable, Equatable {
@@ -41,9 +42,12 @@ public final class Agent: ObservableObject {
     public let systemPrompt: String
     /// runner 内部的工具/子 agent 事件流。可在调试视图里 `for await event in agent.events` 读取。
     public let events: AsyncStream<String>
+    /// 结构化 run/subagent/tool 事件流，用于可视化调试面板。
+    public let runEvents: AsyncStream<VoiceAgentRunEvent>
 
     private let runner: VoiceAgentRunner
     private nonisolated let eventContinuation: AsyncStream<String>.Continuation
+    private nonisolated let runEventContinuation: AsyncStream<VoiceAgentRunEvent>.Continuation
 
     public init(
         systemPrompt: String,
@@ -55,11 +59,17 @@ public final class Agent: ObservableObject {
     ) {
         self.systemPrompt = systemPrompt
         let (stream, continuation) = AsyncStream<String>.makeStream()
+        let (runStream, runContinuation) = AsyncStream<VoiceAgentRunEvent>.makeStream()
         self.events = stream
+        self.runEvents = runStream
         self.eventContinuation = continuation
+        self.runEventContinuation = runContinuation
         // 闭包只捕获 Sendable 的 continuation，避免 self 跨 actor 引用。
         let onEvent: VoiceAgentEventCallback = { [continuation] event in
             continuation.yield(event)
+        }
+        let onRunEvent: VoiceAgentRunEventCallback = { [runContinuation] event in
+            runContinuation.yield(event)
         }
         self.runner = VoiceAgentRunner(
             model: model,
@@ -68,12 +78,14 @@ public final class Agent: ObservableObject {
             tools: tools,
             toolHandlers: toolHandlers,
             options: options,
-            onEvent: onEvent
+            onEvent: onEvent,
+            onRunEvent: onRunEvent
         )
     }
 
     deinit {
         eventContinuation.finish()
+        runEventContinuation.finish()
     }
 
     /// 发送一轮用户输入；UI 状态在调用前后自动维护，失败写入 `lastError` 而非抛出。
@@ -114,6 +126,15 @@ public final class Agent: ObservableObject {
     /// 直接读取 runner 的完整历史（含 system / tool 消息），用于调试或导出。
     public func transcript() async -> [VoiceAgentMessage] {
         await runner.history()
+    }
+
+    /// 当前 runner 保存的 root/subagent run 快照，按创建顺序返回。
+    public func runSnapshots() async -> [VoiceAgentRunSnapshot] {
+        await runner.runSnapshots()
+    }
+
+    public func runSnapshot(runID: UUID) async -> VoiceAgentRunSnapshot? {
+        await runner.runSnapshot(runID: runID)
     }
 }
 
