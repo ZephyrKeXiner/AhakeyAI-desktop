@@ -90,15 +90,14 @@ Build artifacts (`.exe`, `.msi`, `.app`, `.dmg`) are **not** committed. Installe
 
 ## Start here
 
-New contributors:
+**New contributors → [`docs/contributing/`](./docs/contributing/README.md)** — a 4-doc bundle covering dev setup, architecture deep dive, Voice Agent module guide, and PR workflow.
 
-- `docs/repo-layout.md`
-- `docs/installation.md`
-- `docs/architecture.md`
-- `docs/releases.md`
-- `platforms/macos/README.md`
-- `platforms/macos/client/README.md`
-- `platforms/windows/README.md`
+Other entry points:
+
+- `platforms/macos/README.md` — macOS platform overview
+- `platforms/macos/client/README.md` — macOS client build instructions + BLE protocol
+- `platforms/windows/README.md` — Windows platform overview
+- `docs/` — legacy repo-level docs (`architecture.md`, `installation.md`, `repo-layout.md`, `releases.md`, …) — historical reference; the contributing bundle reflects the current state.
 
 ---
 
@@ -157,10 +156,11 @@ desktop/
 
 ## 新同学建议先读
 
-- `docs/repo-layout.md`
-- `docs/installation.md`
-- `docs/architecture.md`
-- `docs/releases.md`
-- `platforms/macos/README.md`
-- `platforms/macos/client/README.md`
-- `platforms/windows/README.md`
+**新贡献者直接看 → [`docs/contributing/`](./docs/contributing/README.md)** —— 4 篇一组：环境搭建、架构深入、Voice Agent 模块指南、PR 流程。
+
+其他入口：
+
+- `platforms/macos/README.md` —— macOS 平台概览
+- `platforms/macos/client/README.md` —— macOS 客户端构建说明 + BLE 协议
+- `platforms/windows/README.md` —— Windows 平台概览
+- `docs/` —— 仓库迁入期的旧文档（`architecture.md` / `installation.md` / `repo-layout.md` / `releases.md` 等），考古用；当前状态以 contributing 那组为准
