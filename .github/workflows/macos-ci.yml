@@ -1,0 +1,47 @@
+name: macOS CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - dev
+      - master
+
+concurrency:
+  group: macos-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: platforms/macos/client
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Resolve packages
+        run: swift package resolve
+
+      - name: Build app
+        run: swift build --product AhaKeyConfig
+
+      - name: Build agent
+        run: swift build --product ahakeyconfig-agent
+
+      - name: Build notch smoke target
+        run: swift build --product AhaKeyNotchSmoke
+
+      - name: Build live session runner
+        run: swift build --product VoiceAgentLiveSession
+
+      - name: Run tests
+        run: swift test
