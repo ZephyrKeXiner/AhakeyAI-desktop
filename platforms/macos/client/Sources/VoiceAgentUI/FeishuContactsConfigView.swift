@@ -1,5 +1,6 @@
 import SwiftUI
 import VoiceAgent
+import FeishuKit
 
 struct FeishuContactsConfigView: View {
     @State private var contacts: [FeishuContact] = []

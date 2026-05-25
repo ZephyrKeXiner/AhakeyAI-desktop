@@ -2,14 +2,12 @@ import AppKit
 import AhaKeyConfigUI
 import SwiftUI
 import UniformTypeIdentifiers
-import VoiceAgent
 
 struct AhaKeyStudioView: View {
     @ObservedObject var bleManager: AhaKeyBLEManager
     @Binding private var rootWorkspaceMode: AhaKeyRootWorkspaceMode
     @StateObject private var voiceRelay = VoiceRelayService.shared
     @StateObject private var nativeSpeech = NativeSpeechTranscriptionService.shared
-    @StateObject private var voiceAgentSession = VoiceAgentSessionStore.shared
     @StateObject private var agentManager = AgentManager.shared
 
     @State private var studioDraft: AhaKeyStudioDraft
@@ -21,7 +19,6 @@ struct AhaKeyStudioView: View {
     @State private var syncStatusMessage = "修改会先保存在本地，连接设备后再同步。"
     @State private var isSyncing = false
     @State private var showsOLEDPlaybackPreview = false
-    @State private var showsVoiceAgentConfiguration = false
     @State private var selectedWorkspace: AhaKeyWorkspaceSection = .workbench
     @AppStorage(AhaKeyAppearanceMode.storageKey) private var appearanceModeRaw = AhaKeyAppearanceMode.light.rawValue
 
@@ -64,7 +61,6 @@ struct AhaKeyStudioView: View {
             agentManager.applyStoredBluetoothPreferenceOnLaunch(bleManager: bleManager)
             voiceRelay.start()
             nativeSpeech.start()
-            voiceAgentSession.start(keyboardMode: AhaKeyModeSlot(rawValue: bleManager.workMode) ?? .mode0)
             applyingCursorRejectMacroSelfHealIfNeeded()
             voiceRelay.updateRoutes(from: studioDraft)
             SwitchStateNotifier.shared.bind(to: bleManager)
@@ -83,9 +79,6 @@ struct AhaKeyStudioView: View {
         .onChange(of: bleManager.workMode) { _, newValue in
             if let slot = AhaKeyModeSlot(rawValue: newValue), slot != selectedMode {
                 selectedMode = slot
-            }
-            if let slot = AhaKeyModeSlot(rawValue: newValue) {
-                voiceAgentSession.updateKeyboardMode(slot)
             }
         }
         .alert("Agent", isPresented: Binding(
@@ -109,9 +102,6 @@ struct AhaKeyStudioView: View {
                 voiceRelay: voiceRelay,
                 nativeSpeech: nativeSpeech
             )
-        }
-        .sheet(isPresented: $showsVoiceAgentConfiguration) {
-            voiceAgentConfigurationSheet
         }
     }
 
@@ -203,18 +193,10 @@ struct AhaKeyStudioView: View {
                 }
             )
             Divider()
-            if selectedMode == .mode2 {
-                VoiceAgentWorkspaceView(
-                    session: voiceAgentSession,
-                    modeEditorHeader: modeEditorHeader,
-                    onOpenConfiguration: openVoiceAgentConfiguration
-                )
-            } else {
-                HStack(spacing: 0) {
-                    canvasPane
-                    Divider()
-                    inspectorPane
-                }
+            HStack(spacing: 0) {
+                canvasPane
+                Divider()
+                inspectorPane
             }
         }
     }
@@ -1298,10 +1280,6 @@ struct AhaKeyStudioView: View {
         )
     }
 
-    private var voiceAgentConfigurationSheet: some View {
-        AhaKeyVoiceAgentConfigurationSheet(isPresented: $showsVoiceAgentConfiguration)
-    }
-
     private var chromeBarBackground: Color {
         AhaKeyUI.ColorToken.card
     }
@@ -1359,16 +1337,10 @@ struct AhaKeyStudioView: View {
     }
 
     private var configurationModeTitle: String {
-        if selectedMode == .mode2 {
-            return "VoiceAgent"
-        }
-        return isEditingConfiguration ? "编辑配置中" : "键盘控制中"
+        isEditingConfiguration ? "编辑配置中" : "键盘控制中"
     }
 
     private var configurationModeDetail: String {
-        if selectedMode == .mode2 {
-            return "主 agent 工作台"
-        }
         if isEditingConfiguration {
             if bleManager.isConnected {
                 return "AhaKey Studio 正在配置键盘"
@@ -1388,9 +1360,6 @@ struct AhaKeyStudioView: View {
     }
 
     private var configurationModeButtonTitle: String {
-        if selectedMode == .mode2 {
-            return "VoiceAgent 设置"
-        }
         if isSyncing {
             return "同步中…"
         }
@@ -1401,9 +1370,6 @@ struct AhaKeyStudioView: View {
     }
 
     private var configurationModeButtonHelp: String {
-        if selectedMode == .mode2 {
-            return "打开 VoiceAgent 运行时配置入口；当前 API key 暂时从 Keychain 读取。"
-        }
         if isEditingConfiguration {
             if hasUnsyncedChanges {
                 return "将当前草稿同步到键盘，然后把蓝牙交还给 Agent。"
@@ -1414,17 +1380,11 @@ struct AhaKeyStudioView: View {
     }
 
     private var statusBarSelectionText: String {
-        if selectedMode == .mode2 {
-            return "VoiceAgent · \(selectedMode.title)"
-        }
-        return "\(selectedPart.title) · \(selectedMode.title)"
+        "\(selectedPart.title) · \(selectedMode.title)"
     }
 
     private var statusBarSelectionIcon: String {
-        if selectedMode == .mode2 {
-            return "point.3.connected.trianglepath.dotted"
-        }
-        return selectedPart.systemImage
+        selectedPart.systemImage
     }
 
     private var syncToKeyboardButtonTitle: String {
@@ -1705,20 +1665,11 @@ struct AhaKeyStudioView: View {
     }
 
     private func handleConfigurationModeButton() {
-        if selectedMode == .mode2 {
-            openVoiceAgentConfiguration()
-            return
-        }
         if isEditingConfiguration {
             finishEditingConfiguration()
         } else {
             enterEditingConfiguration()
         }
-    }
-
-    private func openVoiceAgentConfiguration() {
-        showsVoiceAgentConfiguration = true
-        syncStatusMessage = "VoiceAgent 配置入口已预留，当前运行时读取 Keychain。"
     }
 
     private func enterEditingConfiguration() {

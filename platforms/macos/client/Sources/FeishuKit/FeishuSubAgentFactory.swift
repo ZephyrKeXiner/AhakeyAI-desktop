@@ -1,4 +1,5 @@
 import Foundation
+import VoiceAgent
 
 public extension VoiceSubAgent {
     /// 创建一个飞书发消息专家 subagent。

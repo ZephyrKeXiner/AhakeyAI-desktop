@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import VoiceAgent
+import FeishuKit
 
 @MainActor
 func makeDefaultVoiceAssistantModel() -> VoiceAssistantModel {

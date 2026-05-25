@@ -1,5 +1,6 @@
 import SwiftUI
 import VoiceAgent
+import FeishuKit
 
 /// 飞书集成配置面板：用户填入飞书应用凭证 → lark-cli 配置 → 扫码登录 → 联系人管理。
 /// lark-cli 二进制内置于 app bundle，用户无需安装 Node.js。

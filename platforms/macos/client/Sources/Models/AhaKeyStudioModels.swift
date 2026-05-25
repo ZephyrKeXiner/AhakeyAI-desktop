@@ -22,7 +22,7 @@ enum AhaKeyModeSlot: Int, CaseIterable, Codable, Identifiable {
         case .mode1:
             "Cursor"
         case .mode2:
-            "VoiceAgent"
+            "Mode 2"
         }
     }
 
@@ -33,7 +33,7 @@ enum AhaKeyModeSlot: Int, CaseIterable, Codable, Identifiable {
         case .mode1:
             "Cursor · Composer Accept/Reject"
         case .mode2:
-            "VoiceAgent · 主 Agent / Subagents"
+            "自定义工作模式"
         }
     }
 
@@ -44,7 +44,7 @@ enum AhaKeyModeSlot: Int, CaseIterable, Codable, Identifiable {
         case .mode1:
             "针对 Cursor Composer / Agent：Key2 发 ↵、Key3 发 ⌫（与裸键一致）。若需与「⌘↵ 接受 / ⌘⌫ 拒绝」等组合键一致，请在编辑器里为对应键加修饰，并在 Cursor 设置 → Keyboard Shortcuts 中绑成相同组合。"
         case .mode2:
-            "VoiceAgent 主界面：语音和文本输入进入主 agent，子任务会以 subagent 树展示。"
+            "自定义工作模式：按需设置 Key2/Key3 与 OLED。"
         }
     }
 }
@@ -332,7 +332,7 @@ enum VoicePreset: String, CaseIterable, Codable, Identifiable {
         case .claudeCode:
             "Claude Code"
         case .codex:
-            "VoiceAgent"
+            "Codex"
         case .doubao:
             "豆包输入法"
         case .custom:
@@ -351,7 +351,7 @@ enum VoicePreset: String, CaseIterable, Codable, Identifiable {
         case .claudeCode:
             "使用 macOS 原生语音识别，把识别结果以 ⌘V 粘贴到 Claude Code 当前光标位置。按一次开始、再按一次结束。"
         case .codex:
-            "AhaKey 内置 VoiceAgent。Mode 2 会进入主 agent 工作台，语音输入将发送给主 agent。"
+            "规划中，保留入口。"
         case .doubao:
             "规划中，保留入口。"
         case .custom:
@@ -783,7 +783,7 @@ struct AhaKeyOLEDDraft: Codable, Equatable {
         case .mode1:
             statusLine = "Cursor · ↵ 接受改动 / ⌫ 拒绝改动。"
         case .mode2:
-            statusLine = "VoiceAgent · 主 Agent / Subagent 树。"
+            statusLine = "Mode 2 · 自定义。"
         }
         return AhaKeyOLEDDraft(
             localAssetPath: DefaultOLEDAssets.bundledAssetPath(for: mode),
