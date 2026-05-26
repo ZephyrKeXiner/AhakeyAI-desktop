@@ -1,5 +1,30 @@
 import Foundation
 
+class pluginClient {
+    var nextId = 1
+    let process = Process()
+    let output = Pipe()
+    let input = Pipe()
+    enum Method {
+        case substract
+        case add
+        case multiple
+    }
+
+    init() {
+        process.standardOutput = output
+        process.standardInput = input
+    }
+    
+    func request(parm: String) -> String {
+        
+    }
+
+    func response(parm: String) -> String {
+        
+    }
+}
+
 let process = Process()
 let output = Pipe()
 
