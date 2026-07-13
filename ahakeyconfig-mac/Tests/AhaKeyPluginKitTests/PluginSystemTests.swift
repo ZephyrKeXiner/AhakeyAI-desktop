@@ -167,6 +167,8 @@ final class PluginSystemTests: XCTestCase {
                 atPath: installRoot.appendingPathComponent("dev.ahakey.tests.load-failure").path
             )
         )
+        let installEntries = try FileManager.default.contentsOfDirectory(atPath: installRoot.path)
+        XCTAssertTrue(installEntries.isEmpty, "failed install must not leave a staging directory")
         let snapshot = await runtime.snapshot()
         XCTAssertTrue(snapshot.plugins.isEmpty)
     }

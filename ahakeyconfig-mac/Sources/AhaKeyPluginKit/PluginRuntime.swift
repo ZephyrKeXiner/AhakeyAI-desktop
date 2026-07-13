@@ -140,6 +140,10 @@ public actor PluginRuntime {
         let managerRoot = await manager.installationRoot()
         let root = managerRoot.standardizedFileURL
         let target = root.appendingPathComponent(manifest.id, isDirectory: true)
+        let staging = root.appendingPathComponent(
+            ".installing-\(manifest.id)-\(UUID().uuidString)",
+            isDirectory: true
+        )
         let fm = FileManager.default
         guard source != target else {
             throw PluginManifestError.invalid("plugin is already in the install directory")
@@ -149,15 +153,17 @@ public actor PluginRuntime {
         }
 
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
-        let installedManifest: PluginManifest
+        defer { try? fm.removeItem(at: staging) }
         do {
-            try fm.copyItem(at: source, to: target)
-            installedManifest = try PluginManifest.load(from: target)
+            try fm.copyItem(at: source, to: staging)
+            let stagedManifest = try PluginManifest.load(from: staging)
+            try stagedManifest.validateRuntime()
+            try fm.moveItem(at: staging, to: target)
         } catch {
-            try? fm.removeItem(at: target)
             throw error
         }
 
+        let installedManifest = try PluginManifest.load(from: target)
         PluginPreferences.setEnabled(true, id: manifest.id)
         do {
             try await manager.load(manifest: installedManifest)
