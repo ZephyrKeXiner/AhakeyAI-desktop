@@ -164,7 +164,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // `flag` 会把 VibeBar、语音 HUD 等浮动面板也算作可见窗口，不能据此判断
         // Studio 主窗口是否仍在；统一交给主窗口筛选逻辑处理。
         reopenMainWindow()
-        return true
+        // 已经手动处理 reopen，必须返回 false 阻止 AppKit 再执行默认的 WindowGroup
+        // 重开；返回 true 会形成“手动创建一个 + 系统再创建一个”的双窗口。
+        return false
     }
 
     func reopenMainWindow() {
