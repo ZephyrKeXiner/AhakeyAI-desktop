@@ -9,7 +9,7 @@ let package = Package(
         .executable(name: "VibeBarSmoke", targets: ["VibeBarSmoke"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/MrKai77/DynamicNotchKit", exact: "1.0.0"),
+        .package(path: "Vendor/DynamicNotchKit"),
     ],
     targets: [
         .target(

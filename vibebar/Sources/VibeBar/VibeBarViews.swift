@@ -1,62 +1,37 @@
 import SwiftUI
 
-struct VibeBarCompactKeyboardItem: View {
+/// 实岛静息态：与设置预览一致的统一胶囊布局。
+struct VibeBarCompactIslandCapsule: View {
     @ObservedObject var state: VibeBarState
     let onHoverChanged: (Bool) -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: state.keyboardConnected ? "keyboard.fill" : "keyboard")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(state.keyboardConnected ? .cyan : .secondary)
-            Text(label)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .contentShape(Rectangle())
+        VibeBarCompactNotchPreviewCapsule(
+            model: VibeBarCompactNotchModel(state: state),
+            width: state.islandWidth,
+            agentStatus: state.agentStatus,
+            showsOuterCapsule: false
+        )
+        .contentShape(Capsule(style: .continuous))
         .onHover(perform: onHoverChanged)
-    }
-
-    private var label: String {
-        if !state.keyboardConnected { return "—" }
-        return "\(state.batteryLevel)%"
     }
 }
 
-struct VibeBarCompactLeverItem: View {
+struct VibeBarCompactStatusItem: View {
     @ObservedObject var state: VibeBarState
     let onHoverChanged: (Bool) -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(color)
-            Text(label)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .contentShape(Rectangle())
-        .onHover(perform: onHoverChanged)
+        VibeBarCompactIslandCapsule(state: state, onHoverChanged: onHoverChanged)
     }
+}
 
-    private var icon: String {
-        guard state.leverKnown else { return "questionmark.circle" }
-        return state.leverIsAuto ? "lock.open.fill" : "lock.fill"
-    }
+struct VibeBarCompactVoiceItem: View {
+    @ObservedObject var state: VibeBarState
+    let onHoverChanged: (Bool) -> Void
 
-    private var color: Color {
-        guard state.leverKnown else { return .secondary }
-        return state.leverIsAuto ? .green : .orange
-    }
-
-    private var label: String {
-        guard state.leverKnown else { return "Lever?" }
-        return state.leverIsAuto ? "Auto" : "Ask"
+    var body: some View {
+        EmptyView()
     }
 }
 
@@ -65,20 +40,19 @@ struct VibeBarExpandedMenu: View {
     let onAppear: () -> Void
     let onHoverChanged: (Bool) -> Void
     let onCompact: () -> Void
-    let onOpenMain: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 Image(systemName: "keyboard")
                     .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(.cyan)
+                    .foregroundStyle(VibeBarDesignTokens.Color.accentCyan)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("AhaKey Island")
-                        .font(.system(size: 16, weight: .semibold))
+                    Text("VibeBar")
+                        .font(VibeBarDesignTokens.Typography.title)
                     Text(subtitle)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .font(VibeBarDesignTokens.Typography.subtitle)
+                        .foregroundStyle(VibeBarDesignTokens.Color.textSecondary)
                 }
                 Spacer()
                 Button(action: onCompact) {
@@ -88,42 +62,45 @@ struct VibeBarExpandedMenu: View {
             }
 
             HStack(spacing: 8) {
-                statusTile(
+                capabilityTile(
+                    title: "VoiceAgent",
+                    systemName: "waveform",
+                    badge: "Ready",
+                    tint: VibeBarDesignTokens.Color.accentVoice,
+                    action: { state.onOpenVoiceAgent?() }
+                )
+                capabilityTile(
                     title: "Device",
-                    systemName: state.keyboardConnected ? "keyboard.fill" : "keyboard",
-                    value: state.keyboardConnected ? "\(state.batteryLevel)%" : "Off",
-                    tint: state.keyboardConnected ? .cyan : .secondary
+                    systemName: state.keyboardConnected ? "battery.75percent" : "keyboard",
+                    badge: deviceBadge,
+                    tint: state.keyboardConnected ? VibeBarDesignTokens.Color.accentCyan : .secondary,
+                    action: { state.onOpenDevice?() }
                 )
-                statusTile(
-                    title: "Lever",
-                    systemName: leverIcon,
-                    value: leverValue,
-                    tint: leverTint
+                capabilityTile(
+                    title: "Approve",
+                    systemName: approveIcon,
+                    badge: approveBadge,
+                    tint: approveTint,
+                    action: { state.onOpenApprove?() }
                 )
-                statusTile(
-                    title: "Voice",
-                    systemName: voiceIcon,
-                    value: voiceValue,
-                    tint: voiceTint
-                )
-                statusTile(
-                    title: "Window",
-                    systemName: "macwindow",
-                    value: "Open",
+                capabilityTile(
+                    title: "OLED",
+                    systemName: "rectangle.inset.filled",
+                    badge: "Ready",
                     tint: .indigo,
-                    action: onOpenMain
+                    action: { state.onOpenOLED?() }
                 )
             }
 
             HStack(spacing: 8) {
                 Spacer()
                 Text("Move cursor away to collapse")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .font(VibeBarDesignTokens.Typography.footnote)
+                    .foregroundStyle(VibeBarDesignTokens.Color.textSecondary)
             }
         }
-        .frame(width: 420)
-        .foregroundStyle(.white)
+        .frame(width: state.islandWidth)
+        .foregroundStyle(VibeBarDesignTokens.Color.textPrimary)
         .contentShape(Rectangle())
         .onAppear(perform: onAppear)
         .onHover(perform: onHoverChanged)
@@ -136,64 +113,50 @@ struct VibeBarExpandedMenu: View {
         return state.keyboardConnected ? "Connected" : "Disconnected"
     }
 
-    private var leverIcon: String {
-        guard state.leverKnown else { return "questionmark.circle" }
-        return state.leverIsAuto ? "lock.open.fill" : "lock.fill"
+    private var deviceBadge: String {
+        state.keyboardConnected ? "\(state.batteryLevel)%" : "Off"
     }
 
-    private var leverValue: String {
+    private var approveIcon: String {
+        guard state.leverKnown else { return "questionmark.circle" }
+        return state.leverIsAuto ? "checkmark.circle" : "hand.raised"
+    }
+
+    private var approveBadge: String {
         guard state.leverKnown else { return "Unknown" }
         return state.leverIsAuto ? "Auto" : "Ask"
     }
 
-    private var leverTint: Color {
+    private var approveTint: Color {
         guard state.leverKnown else { return .secondary }
-        return state.leverIsAuto ? .green : .orange
+        return state.leverIsAuto ? VibeBarDesignTokens.Color.accentSuccess : VibeBarDesignTokens.Color.accentWarning
     }
 
-    private var voiceIcon: String {
-        if state.voiceRecording { return "mic.fill" }
-        if state.voiceListening { return "waveform" }
-        return "mic.slash"
-    }
-
-    private var voiceValue: String {
-        if state.voiceRecording { return "Rec" }
-        if state.voiceListening { return "On" }
-        return "Off"
-    }
-
-    private var voiceTint: Color {
-        if state.voiceRecording { return .red }
-        if state.voiceListening { return .green }
-        return .secondary
-    }
-
-    private func statusTile(
+    private func capabilityTile(
         title: String,
         systemName: String,
-        value: String,
+        badge: String,
         tint: Color,
-        action: (() -> Void)? = nil
+        action: @escaping () -> Void
     ) -> some View {
-        Button {
-            action?()
-        } label: {
+        Button(action: action) {
             VStack(spacing: 4) {
                 Image(systemName: systemName)
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(tint)
                 Text(title)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white)
-                Text(value)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .font(VibeBarDesignTokens.Typography.tileTitle)
+                    .foregroundStyle(VibeBarDesignTokens.Color.textPrimary)
+                Text(badge)
+                    .font(VibeBarDesignTokens.Typography.tileBadge)
+                    .foregroundStyle(VibeBarDesignTokens.Color.textSecondary)
             }
-            .frame(width: 90, height: 64)
+            .frame(width: VibeBarDesignTokens.Layout.tileWidth, height: VibeBarDesignTokens.Layout.tileHeight)
         }
         .buttonStyle(.borderless)
-        .disabled(action == nil)
-        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(
+            VibeBarDesignTokens.Color.fillSoft,
+            in: RoundedRectangle(cornerRadius: VibeBarDesignTokens.Layout.tileCornerRadius, style: .continuous)
+        )
     }
 }

@@ -508,7 +508,9 @@ struct AhaKeyUserCenterContent: View {
     }
 
     private func refreshCommunityStats() {
-        installedPluginCount = AhakeyInstalledPluginsStore.discover().count
+        Task { @MainActor in
+            installedPluginCount = await AhakeyInstalledPluginsStore.discover().plugins.count
+        }
     }
 
     // MARK: - Login
