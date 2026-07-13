@@ -67,28 +67,99 @@ enum PluginPackageArchive {
             throw PluginPackageError.archiveTooLarge(actual: size, max: maxArchiveBytes)
         }
 
-        let listingData = try runTool(
-            executable: URL(fileURLWithPath: "/usr/bin/unzip"),
-            arguments: ["-Z1", source.path]
+        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: destination.path)
+
+        // 后续检查与解压只使用私有快照，避免源文件在预检和解压之间被替换。
+        let snapshot = destination.appendingPathComponent("package.zip")
+        try fm.copyItem(at: source, to: snapshot)
+        try fm.setAttributes([.posixPermissions: 0o400], ofItemAtPath: snapshot.path)
+        let snapshotSize = try snapshot.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard snapshotSize <= maxArchiveBytes else {
+            throw PluginPackageError.archiveTooLarge(actual: snapshotSize, max: maxArchiveBytes)
+        }
+
+        try preflightArchive(at: snapshot)
+
+        let payload = destination.appendingPathComponent("payload", isDirectory: true)
+        try fm.createDirectory(at: payload, withIntermediateDirectories: false)
+        _ = try runTool(
+            executable: URL(fileURLWithPath: "/usr/bin/ditto"),
+            arguments: ["-x", "-k", snapshot.path, payload.path]
         )
-        guard let listing = String(data: listingData, encoding: .utf8) else {
+
+        return try inspectExtractedPackage(at: payload)
+    }
+
+    private static func preflightArchive(at archive: URL) throws {
+        let namesData = try runTool(
+            executable: URL(fileURLWithPath: "/usr/bin/zipinfo"),
+            arguments: ["-1", archive.path]
+        )
+        let metadataData = try runTool(
+            executable: URL(fileURLWithPath: "/usr/bin/zipinfo"),
+            arguments: ["-lT", archive.path]
+        )
+        guard let namesOutput = String(data: namesData, encoding: .utf8),
+              let metadataOutput = String(data: metadataData, encoding: .utf8) else {
             throw PluginPackageError.extractionFailed("文件列表不是有效的 UTF-8。")
         }
-        let entries = listing.split(whereSeparator: \.isNewline).map(String.init)
+
+        let entries = namesOutput.split(whereSeparator: \.isNewline).map(String.init)
+        let metadataLines = metadataOutput
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .filter { line in
+                line.range(
+                    of: #"^[bcdlps-][rwxStTs-]{9}\s"#,
+                    options: .regularExpression
+                ) != nil
+            }
+        guard entries.count == metadataLines.count else {
+            throw PluginPackageError.extractionFailed("无法可靠读取插件包条目元数据。")
+        }
         guard entries.count <= maxEntryCount else {
             throw PluginPackageError.tooManyEntries(actual: entries.count, max: maxEntryCount)
         }
-        for entry in entries {
+
+        var expandedBytes: Int64 = 0
+        var canonicalPaths = Set<String>()
+        for (entry, metadataLine) in zip(entries, metadataLines) {
             try validateEntryPath(entry)
+
+            let canonicalPath = entry
+                .replacingOccurrences(of: "\\", with: "/")
+                .precomposedStringWithCanonicalMapping
+                .lowercased()
+            guard canonicalPaths.insert(canonicalPath).inserted else {
+                throw PluginPackageError.unsafeEntry("重复或大小写冲突：\(entry)")
+            }
+
+            let columns = metadataLine.split(
+                separator: " ",
+                maxSplits: 8,
+                omittingEmptySubsequences: true
+            )
+            guard columns.count == 9, let size = Int64(columns[3]) else {
+                throw PluginPackageError.extractionFailed("无法解析条目元数据：\(entry)")
+            }
+            let mode = columns[0]
+            if mode.first == "l" {
+                throw PluginPackageError.symbolicLinkNotAllowed(entry)
+            }
+            guard mode.first == "-" || mode.first == "d" else {
+                throw PluginPackageError.unsafeEntry("不支持的文件类型：\(entry)")
+            }
+
+            let (nextSize, overflow) = expandedBytes.addingReportingOverflow(size)
+            guard !overflow, nextSize <= maxExpandedBytes else {
+                throw PluginPackageError.expandedPackageTooLarge(
+                    actual: overflow ? Int64.max : nextSize,
+                    max: maxExpandedBytes
+                )
+            }
+            expandedBytes = nextSize
         }
-
-        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
-        _ = try runTool(
-            executable: URL(fileURLWithPath: "/usr/bin/ditto"),
-            arguments: ["-x", "-k", source.path, destination.path]
-        )
-
-        return try inspectExtractedPackage(at: destination)
     }
 
     static func validateEntryPath(_ entry: String) throws {

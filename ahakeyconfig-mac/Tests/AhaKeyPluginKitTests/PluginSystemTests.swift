@@ -43,6 +43,34 @@ final class PluginSystemTests: XCTestCase {
         }
     }
 
+    func testArchiveRejectsSymbolicLinksBeforeExtraction() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let package = root.appendingPathComponent("symlink-package", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        try writeManifest(to: package, id: "dev.ahakey.tests.symlink", command: "/bin/sh")
+        try FileManager.default.createSymbolicLink(
+            at: package.appendingPathComponent("outside"),
+            withDestinationURL: URL(fileURLWithPath: "/tmp")
+        )
+
+        let archive = root.appendingPathComponent("symlink.ahakeyplugin")
+        let extractionRoot = root.appendingPathComponent("extracted", isDirectory: true)
+        try createArchive(of: package, at: archive)
+
+        XCTAssertThrowsError(
+            try PluginPackageArchive.extractPluginDirectory(from: archive, to: extractionRoot)
+        ) { error in
+            XCTAssertTrue(error is PluginPackageError)
+            XCTAssertTrue(error.localizedDescription.contains("符号链接"))
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: extractionRoot.appendingPathComponent("payload").path
+            )
+        )
+    }
+
     func testRuntimeInstallsNestedPluginArchive() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
