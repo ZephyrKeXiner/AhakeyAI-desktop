@@ -116,13 +116,12 @@ extension Notification.Name {
     static let ahaKeySettingsSelectTab = Notification.Name("lab.jawa.ahakeyconfig.settingsSelectTab")
     static let ahaKeyStudioSelectPart = Notification.Name("lab.jawa.ahakeyconfig.studioSelectPart")
     static let ahaKeyStudioShowDeviceInfo = Notification.Name("lab.jawa.ahakeyconfig.studioShowDeviceInfo")
-    static let ahaKeyReopenMainWindow = Notification.Name("lab.jawa.ahakeyconfig.reopenMainWindow")
     static let ahaKeyOpenUserCenter = Notification.Name("lab.jawa.ahakeyconfig.openUserCenter")
     static let ahaKeyOpenMyDevices = Notification.Name("lab.jawa.ahakeyconfig.openMyDevices")
     static let ahaKeyOpenPluginMarket = Notification.Name("lab.jawa.ahakeyconfig.openPluginMarket")
 }
 
-/// 监听重新打开主窗口请求；并把 `openWindow` 注册到 AppDelegate，避免主窗口关闭后无人响应。
+/// 把 SwiftUI `openWindow` 注册到 AppDelegate，避免主窗口关闭后无人响应。
 struct MainWindowReopenHelper: View {
     @Environment(\.openWindow) private var openWindow
 
@@ -134,9 +133,6 @@ struct MainWindowReopenHelper: View {
                 AppDelegate.registerOpenMainWindow { [openWindow] in
                     openWindow(id: "main")
                 }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .ahaKeyReopenMainWindow)) { _ in
-                openWindow(id: "main")
             }
     }
 }

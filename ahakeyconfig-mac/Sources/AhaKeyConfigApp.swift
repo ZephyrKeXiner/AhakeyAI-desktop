@@ -49,8 +49,6 @@ struct AhaKeyConfigApp: App {
                 Button("退出 AhaKey Studio") {
                     NSApp.terminate(nil)
                 }
-
-                MainWindowReopenHelper()
             }
         }
     }
@@ -75,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var voiceHUDWasVisible = false
     private var pluginShutdownStarted = false
     private var pluginShutdownFinished = false
+    private var mainWindowReopenPending = false
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
@@ -162,9 +161,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag {
-            reopenMainWindow()
-        }
+        // `flag` 会把 VibeBar、语音 HUD 等浮动面板也算作可见窗口，不能据此判断
+        // Studio 主窗口是否仍在；统一交给主窗口筛选逻辑处理。
+        reopenMainWindow()
         return true
     }
 
@@ -172,27 +171,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         NSApp.activate(ignoringOtherApps: true)
 
         if let window = Self.findStudioMainWindow() {
-            if window.isMiniaturized {
-                window.deminiaturize(nil)
-            }
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            mainWindowReopenPending = false
+            Self.showStudioMainWindow(window)
             return
         }
 
-        // 主窗口已关闭：优先走已注册的 openWindow；并广播通知兜底。
-        if let handler = Self.openMainWindowHandler {
-            handler()
-        }
-        NotificationCenter.default.post(name: .ahaKeyReopenMainWindow, object: nil)
+        // SwiftUI 的 openWindow 是异步的。重建完成前合并 Dock、菜单栏和灵动岛
+        // 连续发来的打开请求，否则每次调用都会创建一个新的 WindowGroup 实例。
+        guard !mainWindowReopenPending else { return }
+        mainWindowReopenPending = true
 
-        // 下一拍再抢一次前台，避免新建窗口仍落在后台。
-        DispatchQueue.main.async {
-            if let window = Self.findStudioMainWindow() {
-                window.makeKeyAndOrderFront(nil)
-                NSApp.activate(ignoringOtherApps: true)
-            }
+        guard let handler = Self.openMainWindowHandler else {
+            mainWindowReopenPending = false
+            return
         }
+        handler()
+        bringReopenedMainWindowToFront(attempt: 0)
+    }
+
+    private func bringReopenedMainWindowToFront(attempt: Int) {
+        if let window = Self.findStudioMainWindow() {
+            mainWindowReopenPending = false
+            Self.showStudioMainWindow(window)
+            return
+        }
+
+        // 给 SwiftUI 最多约 1 秒完成 WindowGroup 的异步创建；超时后允许用户重试。
+        guard attempt < 20 else {
+            mainWindowReopenPending = false
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.bringReopenedMainWindowToFront(attempt: attempt + 1)
+        }
+    }
+
+    private static func showStudioMainWindow(_ window: NSWindow) {
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private static func findStudioMainWindow() -> NSWindow? {
@@ -209,7 +228,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if let miniaturized = candidates.first(where: \.isMiniaturized) {
             return miniaturized
         }
-        return candidates.first
+        // close() 后的 SwiftUI NSWindow 可能短暂残留在 NSApp.windows，但已无法
+        // makeKeyAndOrderFront。不要把这种不可见的旧窗口当成可复用主窗口。
+        return nil
     }
 
     private func installVoiceHUDPanel() {
