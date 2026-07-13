@@ -242,7 +242,7 @@ struct AhakeyPluginMarketPane: View {
                         Text("尚未安装插件")
                             .font(AhakeyPluginMarketTheme.tileTitleFont)
                             .foregroundStyle(AhakeyPluginMarketTheme.primaryText)
-                        Text("点击「从文件安装」选择 .zip、.ahakeyplugin 或 plugin.json。")
+                        Text("点击「从文件安装」选择 .zip 或 .ahakeyplugin 插件包。")
                             .font(AhakeyPluginMarketTheme.captionFont)
                             .foregroundStyle(AhakeyPluginMarketTheme.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -786,7 +786,7 @@ struct AhakeyPluginMarketPane: View {
     private func choosePluginFile() {
         let panel = NSOpenPanel()
         panel.title = "选择插件安装包"
-        var contentTypes: [UTType] = [.zip, .json]
+        var contentTypes: [UTType] = [.zip]
         if let pluginPackageType = UTType(filenameExtension: "ahakeyplugin") {
             contentTypes.append(pluginPackageType)
         }

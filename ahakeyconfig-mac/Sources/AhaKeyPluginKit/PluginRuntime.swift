@@ -117,11 +117,6 @@ public actor PluginRuntime {
             try await installPluginDirectory(source)
             return
         }
-        if source.lastPathComponent.lowercased() == "plugin.json" {
-            try await installPluginDirectory(source.deletingLastPathComponent())
-            return
-        }
-
         let supportedExtensions = ["zip", "ahakeyplugin"]
         guard supportedExtensions.contains(source.pathExtension.lowercased()) else {
             throw PluginPackageError.unsupportedFile(source.lastPathComponent)
@@ -154,16 +149,26 @@ public actor PluginRuntime {
         }
 
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let installedManifest: PluginManifest
         do {
             try fm.copyItem(at: source, to: target)
-            _ = try PluginManifest.load(from: target)
+            installedManifest = try PluginManifest.load(from: target)
         } catch {
             try? fm.removeItem(at: target)
             throw error
         }
 
         PluginPreferences.setEnabled(true, id: manifest.id)
-        _ = await reloadAll()
+        do {
+            try await manager.load(manifest: installedManifest)
+            started = true
+            notifyChange()
+        } catch {
+            PluginPreferences.remove(id: manifest.id)
+            try? fm.removeItem(at: target)
+            notifyChange()
+            throw error
+        }
     }
 
     public func uninstall(id: String) async throws {

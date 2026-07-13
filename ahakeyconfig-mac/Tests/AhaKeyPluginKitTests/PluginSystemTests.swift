@@ -95,6 +95,54 @@ final class PluginSystemTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testRuntimeRejectsDirectManifestFile() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let package = root.appendingPathComponent("package", isDirectory: true)
+        let installRoot = root.appendingPathComponent("installed", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        try writeManifest(to: package, id: "dev.ahakey.tests.direct", command: "/bin/sh")
+        try Data("must not be copied".utf8).write(to: package.appendingPathComponent("secret.txt"))
+
+        let runtime = PluginRuntime(manager: PluginManager(pluginsRoot: installRoot))
+        do {
+            try await runtime.install(from: package.appendingPathComponent("plugin.json"))
+            XCTFail("direct plugin.json installation should be rejected")
+        } catch is PluginPackageError {
+            // Expected.
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: installRoot.path))
+    }
+
+    func testRuntimeRollsBackWhenPluginCannotLoad() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let package = root.appendingPathComponent("package", isDirectory: true)
+        let installRoot = root.appendingPathComponent("installed", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        try writeManifest(
+            to: package,
+            id: "dev.ahakey.tests.load-failure",
+            command: "/bin/sh",
+            permissions: ["host/notReal"]
+        )
+
+        let runtime = PluginRuntime(manager: PluginManager(pluginsRoot: installRoot))
+        do {
+            try await runtime.install(from: package)
+            XCTFail("a plugin with unsupported permissions should fail installation")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("unsupported permissions"))
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: installRoot.appendingPathComponent("dev.ahakey.tests.load-failure").path
+            )
+        )
+        let snapshot = await runtime.snapshot()
+        XCTAssertTrue(snapshot.plugins.isEmpty)
+    }
+
     func testManagerLoadsAndUnloadsAStdioPlugin() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

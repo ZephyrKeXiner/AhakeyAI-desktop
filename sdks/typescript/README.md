@@ -73,8 +73,8 @@ hello-plugin/
 
 Zip that directory as `.zip`, or rename the ZIP extension to
 `.ahakeyplugin`. Users can install it from **Plugin Market → My Plugins → Install
-from File**. The installer also accepts a directly selected `plugin.json` for
-local development.
+from File**. For local development, use **Install from Folder** and select the
+dedicated plugin directory containing `plugin.json`.
 
 Packages are limited to 100 MB compressed, 500 MB expanded, and 10,000 entries.
 They must not contain symbolic links or unsafe archive paths, and exactly one

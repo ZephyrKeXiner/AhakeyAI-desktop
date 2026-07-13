@@ -19,7 +19,7 @@ extension PluginPackageError: LocalizedError {
         case .fileNotFound(let url):
             return "插件包不存在：\(url.path)"
         case .unsupportedFile(let name):
-            return "不支持的插件文件：\(name)。请选择 .zip、.ahakeyplugin 或 plugin.json。"
+            return "不支持的插件文件：\(name)。请选择 .zip 或 .ahakeyplugin。"
         case .archiveTooLarge(let actual, let max):
             return "插件包过大（\(Self.byteCount(actual))），上限为 \(Self.byteCount(max))。"
         case .tooManyEntries(let actual, let max):
