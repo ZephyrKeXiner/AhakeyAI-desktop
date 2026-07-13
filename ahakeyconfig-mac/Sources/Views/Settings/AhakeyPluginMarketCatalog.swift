@@ -101,43 +101,40 @@ enum AhakeyPluginMarketCatalog {
     ]
 }
 
-/// 本机已装插件轻量发现（只读 plugin.json，不拉起进程）。
+/// 本机插件与正式运行时状态的 UI 投影。
 enum AhakeyInstalledPluginsStore {
+    struct Discovery {
+        let plugins: [InstalledPlugin]
+        let errors: [String]
+    }
+
     struct InstalledPlugin: Identifiable, Equatable, Hashable {
         let id: String
         let name: String
         let version: String
         let permissions: [String]
         let directoryPath: String
+        let enabled: Bool
+        let loaded: Bool
+        let methods: [String]
+        let error: String?
     }
 
-    /// 扫描 `PluginManager.defaultPluginsRoot` 下一级子目录中的 `plugin.json`。
-    static func discover() -> [InstalledPlugin] {
-        let root = PluginManager.defaultPluginsRoot
-        let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return []
-        }
-
-        var out: [InstalledPlugin] = []
-        for dir in entries {
-            let isDir = (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            guard isDir else { continue }
-            guard let manifest = try? PluginManifest.load(from: dir) else { continue }
-            out.append(
-                InstalledPlugin(
-                    id: manifest.id,
-                    name: manifest.name,
-                    version: manifest.version,
-                    permissions: manifest.permissions,
-                    directoryPath: dir.path
-                )
+    static func discover() async -> Discovery {
+        let snapshot = await PluginRuntime.shared.snapshot()
+        let plugins = snapshot.plugins.map { plugin in
+            InstalledPlugin(
+                id: plugin.id,
+                name: plugin.name,
+                version: plugin.version,
+                permissions: plugin.permissions,
+                directoryPath: plugin.directory.path,
+                enabled: plugin.enabled,
+                loaded: plugin.loaded,
+                methods: plugin.methods,
+                error: plugin.error
             )
         }
-        return out.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return Discovery(plugins: plugins, errors: snapshot.discoveryErrors)
     }
 }

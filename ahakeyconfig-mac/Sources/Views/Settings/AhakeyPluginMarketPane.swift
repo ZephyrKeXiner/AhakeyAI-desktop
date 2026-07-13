@@ -1,4 +1,6 @@
 import AppKit
+import AhaKeyPluginKit
+import Combine
 import SwiftUI
 
 /// 插件市场：默认「我的插件」；开源市场为次级入口子页。商店级版式（Hero / 货架 / 产品页）。
@@ -10,6 +12,9 @@ struct AhakeyPluginMarketPane: View {
     @State private var showInstallGuide = false
     @State private var selectedInstalledId: String?
     @State private var selectedShelfId: String?
+    @State private var busyPluginID: String?
+    @State private var operationError: String?
+    @State private var discoveryErrors: [String] = []
 
     init(section: Binding<AhakeyPluginMarketSection> = .constant(.mine), onClose: @escaping () -> Void) {
         self._section = section
@@ -59,12 +64,14 @@ struct AhakeyPluginMarketPane: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(AhakeyPluginMarketTheme.canvas)
-        .featureCoachTip(.pluginComingSoon, isActive: true, alignment: .topTrailing)
-        .onAppear(perform: refreshInstalled)
+        .task { await refreshInstalled() }
+        .onReceive(NotificationCenter.default.publisher(for: .ahaKeyPluginRuntimeDidChange)) { _ in
+            Task { await refreshInstalled() }
+        }
         .onChange(of: section) { newValue in
             clearDetailSelection()
             if newValue == .mine {
-                refreshInstalled()
+                Task { await refreshInstalled() }
             }
         }
     }
@@ -177,12 +184,34 @@ struct AhakeyPluginMarketPane: View {
                     .font(AhakeyPluginMarketTheme.sectionTitleFont)
                     .foregroundStyle(AhakeyPluginMarketTheme.primaryText)
                 Spacer(minLength: 0)
+                Button("从文件夹安装") {
+                    choosePluginFolder()
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 12, weight: .medium))
+                .disabled(busyPluginID != nil)
+
                 Button("刷新") {
-                    refreshInstalled()
+                    Task { await reloadAllPlugins() }
                 }
                 .buttonStyle(.borderless)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(AhakeyPluginMarketTheme.accent)
+                .disabled(busyPluginID != nil)
+            }
+
+            if let operationError {
+                Text(operationError)
+                    .font(AhakeyPluginMarketTheme.captionFont)
+                    .foregroundStyle(Color.red)
+                    .textSelection(.enabled)
+            }
+
+            ForEach(discoveryErrors, id: \.self) { error in
+                Text(error)
+                    .font(AhakeyPluginMarketTheme.captionFont)
+                    .foregroundStyle(Color.red)
+                    .textSelection(.enabled)
             }
 
             if installed.isEmpty {
@@ -237,7 +266,7 @@ struct AhakeyPluginMarketPane: View {
                                 .font(AhakeyPluginMarketTheme.tileTitleFont)
                                 .foregroundStyle(AhakeyPluginMarketTheme.primaryText)
                                 .lineLimit(1)
-                            statusPill(title: "已安装", tint: Color.green)
+                            pluginStatusPill(plugin)
                         }
                         Text("v\(plugin.version) · \(plugin.id)")
                             .font(AhakeyPluginMarketTheme.metaFont)
@@ -260,7 +289,9 @@ struct AhakeyPluginMarketPane: View {
             Divider().background(AhakeyPluginMarketTheme.divider)
             guideStep(index: 2, title: "下载并安装到本机", detail: "安装目录：\(AhakeyPluginMarketCatalog.localInstallPathHint)")
             Divider().background(AhakeyPluginMarketTheme.divider)
-            guideStep(index: 3, title: "宿主自动扫描加载", detail: "每个插件目录需包含 plugin.json；权限按白名单声明。")
+            guideStep(index: 3, title: "确认来源可信", detail: "插件是本机子进程，安装前请审核源码与入口命令。")
+            Divider().background(AhakeyPluginMarketTheme.divider)
+            guideStep(index: 4, title: "宿主自动扫描加载", detail: "每个插件目录需包含 plugin.json；权限按白名单声明。")
         }
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -440,7 +471,7 @@ struct AhakeyPluginMarketPane: View {
             productHero(
                 systemImage: "puzzlepiece.extension",
                 title: plugin.name,
-                badge: statusPill(title: "已安装", tint: Color.green),
+                badge: pluginStatusPill(plugin),
                 meta: "\(plugin.id) · v\(plugin.version)"
             ) {
                 HStack(spacing: 10) {
@@ -452,14 +483,30 @@ struct AhakeyPluginMarketPane: View {
                     .buttonStyle(.borderedProminent)
                     .tint(AhakeyPluginMarketTheme.accent)
 
-                    Button("卸载") {}
+                    Button(plugin.enabled ? "停用" : "启用") {
+                        Task { await setPluginEnabled(!plugin.enabled, plugin: plugin) }
+                    }
                         .buttonStyle(.bordered)
-                        .disabled(true)
-                        .help("即将开放：从本机插件目录移除")
+                        .disabled(busyPluginID != nil)
 
-                    Text("卸载即将开放")
-                        .font(AhakeyPluginMarketTheme.captionFont)
-                        .foregroundStyle(AhakeyPluginMarketTheme.tertiaryText)
+                    if plugin.enabled {
+                        Button("重新加载") {
+                            Task { await reloadPlugin(plugin) }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(busyPluginID != nil)
+                    }
+
+                    Button("移到废纸篓", role: .destructive) {
+                        Task { await uninstallPlugin(plugin) }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(busyPluginID != nil)
+
+                    if busyPluginID == plugin.id {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
 
                     Spacer(minLength: 0)
                 }
@@ -481,6 +528,23 @@ struct AhakeyPluginMarketPane: View {
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(AhakeyPluginMarketTheme.secondaryText)
                         FlowPermissionChips(permissions: plugin.permissions)
+                    }
+
+                    if !plugin.methods.isEmpty {
+                        Text("已注册方法")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(AhakeyPluginMarketTheme.secondaryText)
+                        Text(plugin.methods.joined(separator: "\n"))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(AhakeyPluginMarketTheme.tertiaryText)
+                            .textSelection(.enabled)
+                    }
+
+                    if let error = plugin.error ?? operationError {
+                        Text(error)
+                            .font(AhakeyPluginMarketTheme.captionFont)
+                            .foregroundStyle(Color.red)
+                            .textSelection(.enabled)
                     }
                 }
             }
@@ -624,6 +688,20 @@ struct AhakeyPluginMarketPane: View {
         )
     }
 
+    private func pluginStatusPill(_ plugin: AhakeyInstalledPluginsStore.InstalledPlugin) -> some View {
+        Group {
+            if !plugin.enabled {
+                statusPill(title: "已停用", tint: Color.secondary)
+            } else if plugin.loaded {
+                statusPill(title: "运行中", tint: Color.green)
+            } else if plugin.error != nil {
+                statusPill(title: "加载失败", tint: Color.red)
+            } else {
+                statusPill(title: "待加载", tint: Color.orange)
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     private func clearDetailSelection() {
@@ -631,13 +709,90 @@ struct AhakeyPluginMarketPane: View {
         selectedShelfId = nil
     }
 
-    private func refreshInstalled() {
-        installed = AhakeyInstalledPluginsStore.discover()
+    @MainActor
+    private func refreshInstalled() async {
+        let discovery = await AhakeyInstalledPluginsStore.discover()
+        installed = discovery.plugins
+        discoveryErrors = discovery.errors
+        if let selectedInstalledId,
+           !installed.contains(where: { $0.id == selectedInstalledId }) {
+            self.selectedInstalledId = nil
+        }
+    }
+
+    @MainActor
+    private func reloadAllPlugins() async {
+        busyPluginID = "*"
+        operationError = nil
+        _ = await PluginRuntime.shared.reloadAll()
+        await refreshInstalled()
+        busyPluginID = nil
+    }
+
+    @MainActor
+    private func setPluginEnabled(
+        _ enabled: Bool,
+        plugin: AhakeyInstalledPluginsStore.InstalledPlugin
+    ) async {
+        busyPluginID = plugin.id
+        operationError = nil
+        await PluginRuntime.shared.setEnabled(enabled, id: plugin.id)
+        await refreshInstalled()
+        busyPluginID = nil
+    }
+
+    @MainActor
+    private func reloadPlugin(_ plugin: AhakeyInstalledPluginsStore.InstalledPlugin) async {
+        busyPluginID = plugin.id
+        operationError = nil
+        do {
+            try await PluginRuntime.shared.reload(id: plugin.id)
+        } catch {
+            operationError = error.localizedDescription
+        }
+        await refreshInstalled()
+        busyPluginID = nil
+    }
+
+    @MainActor
+    private func uninstallPlugin(_ plugin: AhakeyInstalledPluginsStore.InstalledPlugin) async {
+        busyPluginID = plugin.id
+        operationError = nil
+        do {
+            try await PluginRuntime.shared.uninstall(id: plugin.id)
+            selectedInstalledId = nil
+        } catch {
+            operationError = error.localizedDescription
+        }
+        await refreshInstalled()
+        busyPluginID = nil
     }
 
     private func revealInFinder(path: String) {
         let url = URL(fileURLWithPath: path)
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    @MainActor
+    private func choosePluginFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "选择包含 plugin.json 的插件文件夹"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+
+        busyPluginID = "*"
+        operationError = nil
+        Task {
+            do {
+                try await PluginRuntime.shared.install(from: directory)
+            } catch {
+                operationError = error.localizedDescription
+            }
+            await refreshInstalled()
+            busyPluginID = nil
+        }
     }
 
     private func revealSDKExamples() {

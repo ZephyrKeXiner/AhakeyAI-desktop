@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// 一个 JSON-RPC 2.0 over stdio 客户端。
@@ -30,8 +31,12 @@ public actor PluginClient {
     /// 单次 `call` 等待响应的默认超时。`notify` 不受此影响。
     public var defaultCallTimeout: TimeInterval = 30
 
+    /// 防止损坏或恶意插件用没有换行的 stdout 无限撑大宿主内存。
+    public var maximumFrameBytes = 1_048_576
+
     /// 子进程 stderr 回调，nil 表示透传到本进程 stderr。
     public var onStderr: (@Sendable (String) -> Void)?
+    private var onTermination: (@Sendable (Int32?) -> Void)?
 
     // MARK: - 进程 / 管道
 
@@ -45,6 +50,7 @@ public actor PluginClient {
 
     private var nextID = 1
     private var pending: [Int: CheckedContinuation<JSONValue, Error>] = [:]
+    private var pendingTimeouts: [Int: Task<Void, Never>] = [:]
 
     /// 服务端 → 客户端的 notification 处理器（method → 处理闭包）。
     public typealias NotificationHandler = @Sendable (JSONValue?) -> Void
@@ -92,10 +98,18 @@ public actor PluginClient {
         startStderrReader()
     }
 
-    /// 优雅停止：关闭 stdin，等子进程自然退出；若想强杀用 `terminate()`。
-    public func stop() {
+    /// 优雅停止：关闭 stdin，等待退出；超时后先 SIGTERM，再以 SIGKILL 收尾。
+    public func stop(gracePeriod: TimeInterval = 2) async {
         guard started else { return }
         try? stdinPipe.fileHandleForWriting.close()
+
+        if await waitForExit(seconds: gracePeriod) { return }
+        process.terminate()
+        if await waitForExit(seconds: 1) { return }
+        if process.isRunning {
+            Darwin.kill(process.processIdentifier, SIGKILL)
+            _ = await waitForExit(seconds: 1)
+        }
     }
 
     public func terminate() {
@@ -111,6 +125,10 @@ public actor PluginClient {
 
     public func setRequestHandler(_ method: String, _ handler: @escaping RequestHandler) {
         requestHandlers[method] = handler
+    }
+
+    public func setTerminationHandler(_ handler: @escaping @Sendable (Int32?) -> Void) {
+        onTermination = handler
     }
 
     // MARK: - 发送：call / notify
@@ -188,9 +206,18 @@ public actor PluginClient {
 
     private func appendStdout(_ data: Data) async {
         stdoutBuffer.append(data)
+        if stdoutBuffer.count > maximumFrameBytes,
+           stdoutBuffer.firstIndex(of: 0x0A) == nil {
+            await rejectOversizedFrame()
+            return
+        }
         while let nl = stdoutBuffer.firstIndex(of: 0x0A) {
             let lineData = stdoutBuffer.subdata(in: stdoutBuffer.startIndex ..< nl)
             stdoutBuffer.removeSubrange(stdoutBuffer.startIndex ... nl)
+            if lineData.count > maximumFrameBytes {
+                await rejectOversizedFrame()
+                return
+            }
             if let line = String(data: lineData, encoding: .utf8) {
                 await handleIncoming(line: line)
             }
@@ -252,6 +279,7 @@ public actor PluginClient {
             return
         }
         guard let cont = pending.removeValue(forKey: i) else { return }
+        pendingTimeouts.removeValue(forKey: i)?.cancel()
         if let err = response.error {
             cont.resume(throwing: err)
         } else {
@@ -330,14 +358,17 @@ public actor PluginClient {
 
     private func armTimeout(id: Int, after seconds: TimeInterval) {
         guard seconds > 0 else { return }
-        Task {
+        pendingTimeouts[id]?.cancel()
+        pendingTimeouts[id] = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            failPending(id: id, with: PluginClientError.timeout)
+            guard !Task.isCancelled else { return }
+            await self?.failPending(id: id, with: PluginClientError.timeout)
         }
     }
 
     private func failPending(id: Int, with error: Error) {
         guard let cont = pending.removeValue(forKey: id) else { return }
+        pendingTimeouts.removeValue(forKey: id)?.cancel()
         cont.resume(throwing: error)
     }
 
@@ -348,9 +379,36 @@ public actor PluginClient {
             ?? PluginClientError.notRunning
         let pendingSnapshot = pending
         pending.removeAll()
+        let timeoutSnapshot = pendingTimeouts
+        pendingTimeouts.removeAll()
+        for (_, task) in timeoutSnapshot { task.cancel() }
         for (_, cont) in pendingSnapshot {
             cont.resume(throwing: err)
         }
+        onTermination?(status)
+    }
+
+    private func waitForExit(seconds: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(max(0, seconds))
+        while process.isRunning, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return !process.isRunning
+    }
+
+    private func rejectOversizedFrame() async {
+        stdoutBuffer.removeAll(keepingCapacity: false)
+        FileHandle.standardError.write(
+            Data("[PluginClient] plugin frame exceeded \(maximumFrameBytes) bytes; terminating\n".utf8)
+        )
+        let pendingSnapshot = pending
+        pending.removeAll()
+        let timeoutSnapshot = pendingTimeouts
+        pendingTimeouts.removeAll()
+        for (_, task) in timeoutSnapshot { task.cancel() }
+        for (_, continuation) in pendingSnapshot {
+            continuation.resume(throwing: PluginClientError.frameTooLarge)
+        }
+        process.terminate()
     }
 }
-

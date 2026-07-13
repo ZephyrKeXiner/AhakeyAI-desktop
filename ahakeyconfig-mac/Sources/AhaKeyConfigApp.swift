@@ -5,6 +5,7 @@ import Speech
 import UserNotifications
 import VibeBar
 import Combine
+import AhaKeyPluginKit
 
 @main
 struct AhaKeyConfigApp: App {
@@ -72,6 +73,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var lastHUDCommittedText = ""
     private var voiceHUDUserFrameOrigin: NSPoint?
     private var voiceHUDWasVisible = false
+    private var pluginShutdownStarted = false
+    private var pluginShutdownFinished = false
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
@@ -122,6 +125,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         installVoiceHUDPanel()
         observeVoiceHUDVisibility()
         VoiceStatusHUDController.shared.suppressRecordingStates = true
+
+        Task {
+            let count = await PluginRuntime.shared.start()
+            if count > 0 {
+                FileHandle.standardError.write(
+                    Data("[plugins] loaded \(count) plugin(s)\n".utf8)
+                )
+            }
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if pluginShutdownFinished { return .terminateNow }
+        guard !pluginShutdownStarted else { return .terminateLater }
+        pluginShutdownStarted = true
+        Task {
+            await PluginRuntime.shared.stop()
+            pluginShutdownFinished = true
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func userNotificationCenter(

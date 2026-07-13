@@ -11,6 +11,7 @@ import Foundation
 //   "id": "com.example.hello",
 //   "name": "Hello Plugin",
 //   "version": "0.1.0",
+//   "apiVersion": 1,
 //   "entrypoint": {
 //     "command": "python3",
 //     "args": ["${pluginDir}/main.py"]
@@ -27,9 +28,12 @@ import Foundation
 //   未声明的会直接回 method-not-found（-32601）。
 
 public struct PluginManifest: Codable, Sendable, Equatable {
+    public static let supportedAPIVersion = 1
+
     public let id: String
     public let name: String
     public let version: String
+    public let apiVersion: Int
     public let entrypoint: Entrypoint
     public let permissions: [String]
 
@@ -52,6 +56,7 @@ public struct PluginManifest: Codable, Sendable, Equatable {
         id: String,
         name: String,
         version: String,
+        apiVersion: Int = PluginManifest.supportedAPIVersion,
         entrypoint: Entrypoint,
         permissions: [String] = [],
         directory: URL = URL(fileURLWithPath: "/")
@@ -59,13 +64,14 @@ public struct PluginManifest: Codable, Sendable, Equatable {
         self.id = id
         self.name = name
         self.version = version
+        self.apiVersion = apiVersion
         self.entrypoint = entrypoint
         self.permissions = permissions
         self.directory = directory
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, version, entrypoint, permissions
+        case id, name, version, apiVersion, entrypoint, permissions
     }
 
     public init(from decoder: Decoder) throws {
@@ -73,6 +79,8 @@ public struct PluginManifest: Codable, Sendable, Equatable {
         id = try c.decode(String.self, forKey: .id)
         name = try c.decode(String.self, forKey: .name)
         version = try c.decode(String.self, forKey: .version)
+        apiVersion = try c.decodeIfPresent(Int.self, forKey: .apiVersion)
+            ?? PluginManifest.supportedAPIVersion
         entrypoint = try c.decode(Entrypoint.self, forKey: .entrypoint)
         permissions = try c.decodeIfPresent([String].self, forKey: .permissions) ?? []
         directory = URL(fileURLWithPath: "/")
@@ -84,6 +92,26 @@ public struct PluginManifest: Codable, Sendable, Equatable {
 public enum PluginManifestError: Error, Sendable {
     case fileNotFound(URL)
     case decode(URL, String)
+    case invalid(String)
+    case incompatibleAPIVersion(requested: Int, supported: Int)
+    case runtimeUnavailable(String)
+}
+
+extension PluginManifestError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .fileNotFound(let url):
+            return "Plugin manifest not found: \(url.path)"
+        case .decode(let url, let detail):
+            return "Invalid plugin manifest at \(url.path): \(detail)"
+        case .invalid(let detail):
+            return "Invalid plugin manifest: \(detail)"
+        case .incompatibleAPIVersion(let requested, let supported):
+            return "Plugin requires API v\(requested), but this host supports v\(supported)"
+        case .runtimeUnavailable(let command):
+            return "Plugin runtime is unavailable: \(command)"
+        }
+    }
 }
 
 public extension PluginManifest {
@@ -102,9 +130,41 @@ public extension PluginManifest {
         do {
             var manifest = try JSONDecoder().decode(PluginManifest.self, from: data)
             manifest.directory = directory
+            try manifest.validate()
             return manifest
+        } catch let error as PluginManifestError {
+            throw error
         } catch {
             throw PluginManifestError.decode(url, "\(error)")
+        }
+    }
+
+    func validate() throws {
+        let idPattern = #"^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"#
+        guard id.range(of: idPattern, options: .regularExpression) != nil else {
+            throw PluginManifestError.invalid("id must be 3-128 reverse-DNS-safe characters")
+        }
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw PluginManifestError.invalid("name must not be empty")
+        }
+        let versionPattern = #"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"#
+        guard version.range(of: versionPattern, options: .regularExpression) != nil else {
+            throw PluginManifestError.invalid("version must be semantic versioning compatible")
+        }
+        guard apiVersion == Self.supportedAPIVersion else {
+            throw PluginManifestError.incompatibleAPIVersion(
+                requested: apiVersion,
+                supported: Self.supportedAPIVersion
+            )
+        }
+        guard !entrypoint.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw PluginManifestError.invalid("entrypoint.command must not be empty")
+        }
+        guard Set(permissions).count == permissions.count else {
+            throw PluginManifestError.invalid("permissions must not contain duplicates")
+        }
+        guard permissions.allSatisfy({ $0.hasPrefix("host/") }) else {
+            throw PluginManifestError.invalid("permissions may only contain host/* methods")
         }
     }
 
@@ -115,12 +175,55 @@ public extension PluginManifest {
 
     /// 解析好的、可直接交给 `Process` 的子进程描述。
     var resolvedEntrypoint: ResolvedEntrypoint {
-        ResolvedEntrypoint(
+        var environment = ProcessInfo.processInfo.environment
+        let commonExecutablePaths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ]
+        let currentPath = environment["PATH"] ?? ""
+        let pathParts = currentPath.split(separator: ":").map(String.init)
+        environment["PATH"] = (commonExecutablePaths + pathParts)
+            .reduce(into: [String]()) { result, value in
+                if !result.contains(value) { result.append(value) }
+            }
+            .joined(separator: ":")
+        for (key, value) in entrypoint.env ?? [:] {
+            environment[key] = substitute(value)
+        }
+        return ResolvedEntrypoint(
             executable: URL(fileURLWithPath: "/usr/bin/env"),
             arguments: [entrypoint.command] + entrypoint.args.map(substitute),
-            environment: entrypoint.env?.mapValues(substitute),
+            environment: environment,
             workingDirectory: directory
         )
+    }
+
+    func validateRuntime() throws {
+        let command = substitute(entrypoint.command)
+        let fm = FileManager.default
+        if command.contains("/") {
+            guard fm.isExecutableFile(atPath: command) else {
+                throw PluginManifestError.runtimeUnavailable(command)
+            }
+            return
+        }
+        let path = resolvedEntrypoint.environment?["PATH"] ?? ""
+        let available = path.split(separator: ":").contains { component in
+            fm.isExecutableFile(
+                atPath: URL(fileURLWithPath: String(component))
+                    .appendingPathComponent(command)
+                    .path
+            )
+        }
+        guard available else {
+            throw PluginManifestError.runtimeUnavailable(
+                "\(command) (install it or use an absolute executable path)"
+            )
+        }
     }
 }
 

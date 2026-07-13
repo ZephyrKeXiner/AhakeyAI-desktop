@@ -42,6 +42,7 @@ Each plugin directory also needs a `plugin.json` manifest:
   "id": "com.example.hello",
   "name": "Hello Plugin",
   "version": "0.1.0",
+  "apiVersion": 1,
   "entrypoint": {
     "command": "node",
     "args": ["${pluginDir}/dist/main.js"]
@@ -52,6 +53,10 @@ Each plugin directory also needs a `plugin.json` manifest:
 
 The host replaces `${pluginDir}` with the directory containing `plugin.json`.
 Only the declared `host/*` permissions can be called by the plugin.
+`apiVersion` is currently `1`; incompatible versions are rejected before launch.
+
+Installed plugins are trusted local processes, not sandboxed extensions. Review
+their source and entrypoint before installing them into AhaKey Studio.
 
 ## Host API
 

@@ -2,6 +2,7 @@
   "id": "dev.ahakey.example.lever-counter",
   "name": "AhaKey Lever Counter",
   "version": "0.1.0",
+  "apiVersion": 1,
   "entrypoint": {
     "command": "node",
     "args": ["${pluginDir}/dist/main.js"]

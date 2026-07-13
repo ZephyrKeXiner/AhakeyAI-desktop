@@ -17,6 +17,7 @@ public actor PluginManager {
     }
 
     public struct LoadFailure: Sendable {
+        public let pluginID: String?
         public let manifestDirectory: URL
         public let error: String
     }
@@ -60,14 +61,27 @@ public actor PluginManager {
             return []
         }
         var out: [PluginManifest] = []
+        var seenIDs = Set<String>()
         for dir in entries {
             let isDir = (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
             guard isDir else { continue }
             do {
                 let manifest = try PluginManifest.load(from: dir)
+                guard seenIDs.insert(manifest.id).inserted else {
+                    recordFailure(.init(
+                        pluginID: manifest.id,
+                        manifestDirectory: dir,
+                        error: "Duplicate plugin id: \(manifest.id)"
+                    ))
+                    continue
+                }
                 out.append(manifest)
             } catch {
-                failures.append(.init(manifestDirectory: dir, error: "\(error)"))
+                recordFailure(.init(
+                    pluginID: nil,
+                    manifestDirectory: dir,
+                    error: error.localizedDescription
+                ))
                 FileHandle.standardError.write(
                     Data("[PluginManager] skip \(dir.lastPathComponent): \(error)\n".utf8)
                 )
@@ -80,25 +94,39 @@ public actor PluginManager {
 
     /// 把发现到的插件全部加载。返回成功数；失败的写到 `failures` 与 stderr。
     @discardableResult
-    public func loadAll() async -> Int {
+    public func loadAll(excluding disabledPluginIDs: Set<String> = []) async -> Int {
+        failures.removeAll()
         let manifests = discover()
-        var ok = 0
+        let before = loaded.count
         for m in manifests {
+            guard !disabledPluginIDs.contains(m.id) else { continue }
             do {
                 try await load(manifest: m)
-                ok += 1
             } catch {
-                failures.append(.init(manifestDirectory: m.directory, error: "\(error)"))
+                recordFailure(.init(
+                    pluginID: m.id,
+                    manifestDirectory: m.directory,
+                    error: error.localizedDescription
+                ))
                 FileHandle.standardError.write(
                     Data("[PluginManager] load \(m.id) failed: \(error)\n".utf8)
                 )
             }
         }
-        return ok
+        return loaded.count - before
     }
 
     public func load(manifest: PluginManifest) async throws {
         if loaded[manifest.id] != nil { return } // 幂等
+
+        try manifest.validateRuntime()
+        let unknownPermissions = Set(manifest.permissions)
+            .subtracting(Set(PluginHost.availableHostMethods))
+        guard unknownPermissions.isEmpty else {
+            throw PluginManifestError.invalid(
+                "unsupported permissions: \(unknownPermissions.sorted().joined(separator: ", "))"
+            )
+        }
 
         let ep = manifest.resolvedEntrypoint
         let client = PluginClient(
@@ -112,25 +140,47 @@ public actor PluginManager {
             appInfo: appInfo,
             permissions: Set(manifest.permissions)
         )
-        await host.registerDefaultHandlers()
-        try await client.start()
+        do {
+            await host.registerDefaultHandlers()
+            await client.setTerminationHandler { [weak self] status in
+                Task { await self?.pluginDidTerminate(id: manifest.id, status: status) }
+            }
+            try await client.start()
 
-        // 握手
-        let info = try await client.initialize(
-            host: appInfo,
-            hostMethods: PluginHost.availableHostMethods
-        )
-        try await client.sendInitialized()
+            // 握手
+            let info = try await client.initialize(
+                host: appInfo,
+                hostMethods: PluginHost.availableHostMethods
+            )
+            try await client.sendInitialized()
 
-        loaded[manifest.id] = LoadedPlugin(manifest: manifest, host: host, initialize: info)
+            loaded[manifest.id] = LoadedPlugin(manifest: manifest, host: host, initialize: info)
+        } catch {
+            host.cleanup()
+            await client.stop(gracePeriod: 0.5)
+            throw error
+        }
     }
 
     public func unloadAll() async {
-        for (_, p) in loaded {
-            await p.host.client.shutdown()
-            await p.host.client.stop()
+        for id in Array(loaded.keys) {
+            await unload(id: id)
         }
-        loaded.removeAll()
+    }
+
+    public func unload(id: String) async {
+        guard let plugin = loaded.removeValue(forKey: id) else { return }
+        await plugin.host.client.shutdown()
+        plugin.host.cleanup()
+        await plugin.host.client.stop()
+    }
+
+    public func reload(id: String) async throws {
+        await unload(id: id)
+        guard let manifest = discover().first(where: { $0.id == id }) else {
+            throw PluginManifestError.invalid("plugin is not installed: \(id)")
+        }
+        try await load(manifest: manifest)
     }
 
     // MARK: - 查询
@@ -141,5 +191,31 @@ public actor PluginManager {
 
     public func plugin(id: String) -> LoadedPlugin? {
         loaded[id]
+    }
+
+    public func failure(id: String) -> LoadFailure? {
+        failures.last { $0.pluginID == id }
+    }
+
+    private func pluginDidTerminate(id: String, status: Int32?) {
+        guard let plugin = loaded.removeValue(forKey: id) else { return }
+        plugin.host.cleanup()
+        let detail = status.map { "Plugin process exited with status \($0)" }
+            ?? "Plugin process closed its output"
+        recordFailure(.init(
+            pluginID: id,
+            manifestDirectory: plugin.manifest.directory,
+            error: detail
+        ))
+        NotificationCenter.default.post(name: .ahaKeyPluginRuntimeDidChange, object: nil)
+    }
+
+    private func recordFailure(_ failure: LoadFailure) {
+        guard !failures.contains(where: {
+            $0.pluginID == failure.pluginID
+                && $0.manifestDirectory == failure.manifestDirectory
+                && $0.error == failure.error
+        }) else { return }
+        failures.append(failure)
     }
 }

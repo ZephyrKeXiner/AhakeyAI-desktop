@@ -83,10 +83,10 @@ public final class PluginHost: @unchecked Sendable {
 
         await register("host/pasteText") { params in
             let text = try HostActionParams.requiredString(params, key: "text", method: "host/pasteText")
-            await MainActor.run {
+            let pasted = await MainActor.run {
                 HostTextInjector.paste(text)
             }
-            return .object(["pasted": .bool(true)])
+            return .object(["pasted": .bool(pasted)])
         }
 
         await register("host/registerGlobalHotkey") { [weak self] params in
@@ -95,7 +95,7 @@ public final class PluginHost: @unchecked Sendable {
             }
             let hotkey = try HostActionParams.requiredString(params, key: "hotkey", method: "host/registerGlobalHotkey")
             let callbackMethod = try HostActionParams.requiredString(params, key: "callbackMethod", method: "host/registerGlobalHotkey")
-            let token = HostHotkeyRegistry.shared.register(
+            let token = try HostHotkeyRegistry.shared.register(
                 hotkey: hotkey,
                 callbackMethod: callbackMethod,
                 client: self.client
@@ -108,6 +108,11 @@ public final class PluginHost: @unchecked Sendable {
             HostHotkeyRegistry.shared.unregister(token: token)
             return .object(["unregistered": .bool(true)])
         }
+    }
+
+    /// 清理所有与该插件进程绑定的宿主资源。
+    public func cleanup() {
+        HostHotkeyRegistry.shared.unregisterAll(client: client)
     }
 
     /// 包一层权限检查后注册。不在 `permissions` 里的 method 会被 -32601 直接拒掉。
@@ -149,7 +154,7 @@ enum HostActionParams {
 // MARK: - host/pasteText
 
 enum HostTextInjector {
-    static func paste(_ text: String) {
+    static func paste(_ text: String) -> Bool {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
@@ -157,12 +162,13 @@ enum HostTextInjector {
         let source = CGEventSource(stateID: .combinedSessionState)
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false) else {
-            return
+            return false
         }
         down.flags = .maskCommand
         up.flags = .maskCommand
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
+        return true
     }
 }
 
@@ -175,6 +181,7 @@ final class HostHotkeyRegistry: @unchecked Sendable {
         let token: String
         let hotkey: ParsedHotkey
         let callbackMethod: String
+        let clientID: ObjectIdentifier
         let client: PluginClient
     }
 
@@ -185,13 +192,19 @@ final class HostHotkeyRegistry: @unchecked Sendable {
 
     private init() {}
 
-    func register(hotkey: String, callbackMethod: String, client: PluginClient) -> String {
-        let parsed = ParsedHotkey.parse(hotkey)
+    func register(hotkey: String, callbackMethod: String, client: PluginClient) throws -> String {
+        guard let parsed = ParsedHotkey.parse(hotkey) else {
+            throw JSONRPCError(
+                code: JSONRPCError.invalidParams,
+                message: "Unsupported global hotkey: \(hotkey)"
+            )
+        }
         let token = UUID().uuidString
         let registration = Registration(
             token: token,
             hotkey: parsed,
             callbackMethod: callbackMethod,
+            clientID: ObjectIdentifier(client),
             client: client
         )
         lock.lock()
@@ -208,6 +221,19 @@ final class HostHotkeyRegistry: @unchecked Sendable {
     func unregister(token: String) {
         lock.lock()
         registrations.removeValue(forKey: token)
+        let shouldRemove = registrations.isEmpty
+        lock.unlock()
+
+        if shouldRemove {
+            removeMonitors()
+        }
+    }
+
+
+    func unregisterAll(client: PluginClient) {
+        let clientID = ObjectIdentifier(client)
+        lock.lock()
+        registrations = registrations.filter { $0.value.clientID != clientID }
         let shouldRemove = registrations.isEmpty
         lock.unlock()
 
@@ -267,7 +293,7 @@ struct ParsedHotkey {
     let keyCode: UInt16
     let modifiers: NSEvent.ModifierFlags
 
-    static func parse(_ hotkey: String) -> ParsedHotkey {
+    static func parse(_ hotkey: String) -> ParsedHotkey? {
         let parts = hotkey
             .split(separator: "+")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
@@ -283,7 +309,7 @@ struct ParsedHotkey {
             }
         }
         guard let key, let keyCode = Self.keyCode(for: key) else {
-            return ParsedHotkey(display: hotkey, keyCode: 11, modifiers: [.control, .option, .shift])
+            return nil
         }
         return ParsedHotkey(display: hotkey, keyCode: keyCode, modifiers: modifiers)
     }

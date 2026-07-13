@@ -170,4 +170,6 @@ public enum PluginClientError: Error, Sendable {
     case timeout
     /// 解码失败。
     case decodingFailed(String)
+    /// 插件输出超过宿主允许的单帧大小。
+    case frameTooLarge
 }

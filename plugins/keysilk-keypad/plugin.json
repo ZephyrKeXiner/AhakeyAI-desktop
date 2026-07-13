@@ -2,6 +2,7 @@
   "id": "dev.ahakey.keysilk-keypad",
   "name": "KeySilk Portable Keypad",
   "version": "0.1.0",
+  "apiVersion": 1,
   "entrypoint": {
     "command": "node",
     "args": ["${pluginDir}/dist/main.js"]
