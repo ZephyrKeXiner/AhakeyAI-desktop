@@ -68,6 +68,10 @@ public struct PluginInstallPreview: Identifiable, Sendable, Equatable {
     public let apiVersion: Int
     public let permissions: [String]
     public let packageSHA256: String?
+    public let installedVersion: String?
+    public let installedEnabled: Bool?
+
+    public var isUpdate: Bool { installedVersion != nil }
 
     public var id: String {
         [sourceURL.path, pluginID, version, packageSHA256 ?? "folder"].joined(separator: "|")
@@ -80,6 +84,59 @@ public struct PluginInstallPreview: Identifiable, Sendable, Equatable {
             && apiVersion == manifest.apiVersion
             && permissions == manifest.permissions
             && self.packageSHA256 == packageSHA256
+    }
+}
+
+private struct PluginSemanticVersion: Comparable {
+    private enum Identifier: Equatable {
+        case numeric(Int)
+        case text(String)
+    }
+
+    private let core: [Int]
+    private let prerelease: [Identifier]?
+
+    init?(_ rawValue: String) {
+        let withoutBuild = rawValue.split(separator: "+", maxSplits: 1).first.map(String.init) ?? rawValue
+        let versionParts = withoutBuild.split(separator: "-", maxSplits: 1).map(String.init)
+        let core = versionParts[0].split(separator: ".").compactMap { Int($0) }
+        guard core.count == 3 else { return nil }
+        self.core = core
+        if versionParts.count == 2 {
+            prerelease = versionParts[1].split(separator: ".").map { part in
+                Int(part).map(Identifier.numeric) ?? .text(String(part))
+            }
+        } else {
+            prerelease = nil
+        }
+    }
+
+    static func < (lhs: Self, rhs: Self) -> Bool {
+        for index in 0 ..< 3 where lhs.core[index] != rhs.core[index] {
+            return lhs.core[index] < rhs.core[index]
+        }
+        switch (lhs.prerelease, rhs.prerelease) {
+        case (nil, nil):
+            return false
+        case (.some, nil):
+            return true
+        case (nil, .some):
+            return false
+        case let (.some(lhsParts), .some(rhsParts)):
+            for (lhsPart, rhsPart) in zip(lhsParts, rhsParts) where lhsPart != rhsPart {
+                switch (lhsPart, rhsPart) {
+                case let (.numeric(lhsValue), .numeric(rhsValue)):
+                    return lhsValue < rhsValue
+                case (.numeric, .text):
+                    return true
+                case (.text, .numeric):
+                    return false
+                case let (.text(lhsValue), .text(rhsValue)):
+                    return lhsValue < rhsValue
+                }
+            }
+            return lhsParts.count < rhsParts.count
+        }
     }
 }
 
@@ -146,14 +203,10 @@ public actor PluginRuntime {
             let manifest = try PluginManifest.load(from: source)
             try manifest.validateRuntime()
             try PluginManager.validateHostPermissions(manifest)
-            return PluginInstallPreview(
+            return try await makeInstallPreview(
                 sourceURL: source,
                 sourceKind: .developmentFolder,
-                pluginID: manifest.id,
-                name: manifest.name,
-                version: manifest.version,
-                apiVersion: manifest.apiVersion,
-                permissions: manifest.permissions,
+                manifest: manifest,
                 packageSHA256: nil
             )
         }
@@ -172,15 +225,42 @@ public actor PluginRuntime {
         let manifest = try PluginManifest.load(from: extracted.directory)
         try manifest.validateRuntime()
         try PluginManager.validateHostPermissions(manifest)
-        return PluginInstallPreview(
+        return try await makeInstallPreview(
             sourceURL: source,
             sourceKind: .archive,
+            manifest: manifest,
+            packageSHA256: extracted.sha256
+        )
+    }
+
+    private func makeInstallPreview(
+        sourceURL: URL,
+        sourceKind: PluginInstallPreview.SourceKind,
+        manifest: PluginManifest,
+        packageSHA256: String?
+    ) async throws -> PluginInstallPreview {
+        let installed = await manager.discover().first(where: { $0.id == manifest.id })
+        if let installed {
+            guard let currentVersion = PluginSemanticVersion(installed.version),
+                  let candidateVersion = PluginSemanticVersion(manifest.version),
+                  candidateVersion > currentVersion else {
+                throw PluginPackageError.versionNotNewer(
+                    installed: installed.version,
+                    candidate: manifest.version
+                )
+            }
+        }
+        return PluginInstallPreview(
+            sourceURL: sourceURL,
+            sourceKind: sourceKind,
             pluginID: manifest.id,
             name: manifest.name,
             version: manifest.version,
             apiVersion: manifest.apiVersion,
             permissions: manifest.permissions,
-            packageSHA256: extracted.sha256
+            packageSHA256: packageSHA256,
+            installedVersion: installed?.version,
+            installedEnabled: installed.map { PluginPreferences.isEnabled(id: $0.id) }
         )
     }
 
@@ -253,32 +333,125 @@ public actor PluginRuntime {
         guard source != target else {
             throw PluginManifestError.invalid("plugin is already in the install directory")
         }
-        guard !fm.fileExists(atPath: target.path) else {
-            throw PluginManifestError.invalid("plugin is already installed: \(manifest.id)")
+
+        let existingManifest = fm.fileExists(atPath: target.path)
+            ? try PluginManifest.load(from: target)
+            : nil
+        let existingEnabled = existingManifest.map { PluginPreferences.isEnabled(id: $0.id) }
+        guard preview.installedVersion == existingManifest?.version,
+              preview.installedEnabled == existingEnabled else {
+            throw PluginPackageError.packageChanged
         }
 
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: staging) }
-        do {
-            try fm.copyItem(at: source, to: staging)
-            let stagedManifest = try PluginManifest.load(from: staging)
-            try stagedManifest.validateRuntime()
-            try fm.moveItem(at: staging, to: target)
-        } catch {
-            throw error
+        try fm.copyItem(at: source, to: staging)
+        let stagedManifest = try PluginManifest.load(from: staging)
+        try stagedManifest.validateRuntime()
+        try PluginManager.validateHostPermissions(stagedManifest)
+        guard preview.matches(stagedManifest, packageSHA256: packageSHA256) else {
+            throw PluginPackageError.packageChanged
         }
 
-        let installedManifest = try PluginManifest.load(from: target)
-        PluginPreferences.setEnabled(true, id: manifest.id)
+        if let existingEnabled {
+            try await updatePlugin(
+                id: manifest.id,
+                stagedAt: staging,
+                target: target,
+                wasEnabled: existingEnabled
+            )
+        } else {
+            try await activateNewPlugin(id: manifest.id, stagedAt: staging, target: target)
+        }
+    }
+
+    private func activateNewPlugin(id: String, stagedAt staging: URL, target: URL) async throws {
+        let fm = FileManager.default
+        var movedToTarget = false
         do {
+            try fm.moveItem(at: staging, to: target)
+            movedToTarget = true
+            let installedManifest = try PluginManifest.load(from: target)
+            PluginPreferences.setEnabled(true, id: id)
             try await manager.load(manifest: installedManifest)
             started = true
             notifyChange()
         } catch {
-            PluginPreferences.remove(id: manifest.id)
-            try? fm.removeItem(at: target)
+            PluginPreferences.remove(id: id)
+            if movedToTarget { try? fm.removeItem(at: target) }
             notifyChange()
             throw error
+        }
+    }
+
+    private func updatePlugin(
+        id: String,
+        stagedAt staging: URL,
+        target: URL,
+        wasEnabled: Bool
+    ) async throws {
+        let fm = FileManager.default
+        let backup = target.deletingLastPathComponent().appendingPathComponent(
+            ".backup-\(id)-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        var oldMoved = false
+        var newMoved = false
+
+        await manager.unload(id: id)
+        do {
+            try fm.moveItem(at: target, to: backup)
+            oldMoved = true
+            try fm.moveItem(at: staging, to: target)
+            newMoved = true
+
+            let installedManifest = try PluginManifest.load(from: target)
+            PluginPreferences.setEnabled(wasEnabled, id: id)
+            if wasEnabled {
+                try await manager.load(manifest: installedManifest)
+                started = true
+            }
+            try? fm.removeItem(at: backup)
+            notifyChange()
+        } catch {
+            let updateError = error
+            await manager.unload(id: id)
+            var rollbackErrors: [String] = []
+
+            if newMoved {
+                do {
+                    try fm.removeItem(at: target)
+                } catch {
+                    rollbackErrors.append("remove failed version: \(error.localizedDescription)")
+                }
+            }
+            if oldMoved {
+                do {
+                    try fm.moveItem(at: backup, to: target)
+                } catch {
+                    rollbackErrors.append("restore old files: \(error.localizedDescription)")
+                }
+            }
+
+            PluginPreferences.setEnabled(wasEnabled, id: id)
+            if wasEnabled, fm.fileExists(atPath: target.path) {
+                do {
+                    let restoredManifest = try PluginManifest.load(from: target)
+                    try await manager.load(manifest: restoredManifest)
+                    started = true
+                } catch {
+                    rollbackErrors.append("restart old version: \(error.localizedDescription)")
+                }
+            }
+            notifyChange()
+
+            if rollbackErrors.isEmpty {
+                throw updateError
+            }
+            throw PluginPackageError.rollbackFailed(
+                updateError: updateError.localizedDescription,
+                rollbackError: rollbackErrors.joined(separator: "; ")
+            )
         }
     }
 

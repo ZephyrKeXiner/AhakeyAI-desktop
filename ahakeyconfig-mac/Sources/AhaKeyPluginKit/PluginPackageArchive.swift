@@ -13,6 +13,8 @@ public enum PluginPackageError: Error, Sendable {
     case manifestNotFound
     case multipleManifests(Int)
     case packageChanged
+    case versionNotNewer(installed: String, candidate: String)
+    case rollbackFailed(updateError: String, rollbackError: String)
 }
 
 extension PluginPackageError: LocalizedError {
@@ -40,6 +42,10 @@ extension PluginPackageError: LocalizedError {
             return "插件包中找到 \(count) 个 plugin.json；一个安装包只能包含一个插件。"
         case .packageChanged:
             return "插件包在确认后发生了变化，请重新选择并确认。"
+        case .versionNotNewer(let installed, let candidate):
+            return "已安装版本为 \(installed)，候选版本 \(candidate) 不是更高版本。"
+        case .rollbackFailed(let updateError, let rollbackError):
+            return "插件更新失败（\(updateError)），且旧版本恢复失败（\(rollbackError)）。"
         }
     }
 

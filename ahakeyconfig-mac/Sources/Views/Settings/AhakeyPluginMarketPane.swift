@@ -78,9 +78,9 @@ struct AhakeyPluginMarketPane: View {
         }
         .alert(item: $pendingInstall) { preview in
             Alert(
-                title: Text("安装 \(preview.name)？"),
+                title: Text(preview.isUpdate ? "更新 \(preview.name)？" : "安装 \(preview.name)？"),
                 message: Text(installConfirmationMessage(preview)),
-                primaryButton: .destructive(Text("安装并运行")) {
+                primaryButton: .destructive(Text(preview.isUpdate ? "更新插件" : "安装并运行")) {
                     installPlugin(preview)
                 },
                 secondaryButton: .cancel()
@@ -856,13 +856,14 @@ struct AhakeyPluginMarketPane: View {
 
     private func installConfirmationMessage(_ preview: PluginInstallPreview) -> String {
         let source = preview.sourceKind == .archive ? "本地安装包" : "开发文件夹（内容未做哈希锁定）"
+        let version = preview.installedVersion.map { "\($0) → \(preview.version)" } ?? preview.version
         let permissions = preview.permissions.isEmpty
             ? "无 Host API 权限"
             : preview.permissions.joined(separator: "、")
         let hash = preview.packageSHA256.map { String($0.prefix(16)) + "…" } ?? "无"
         return """
         ID：\(preview.pluginID)
-        版本：\(preview.version) · API v\(preview.apiVersion)
+        版本：\(version) · API v\(preview.apiVersion)
         来源：\(source)
         权限：\(permissions)
         SHA-256：\(hash)

@@ -206,6 +206,139 @@ final class PluginSystemTests: XCTestCase {
         XCTAssertTrue(snapshot.plugins.isEmpty)
     }
 
+    func testRuntimeUpdatesRunningPluginToNewerVersion() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let initial = root.appendingPathComponent("initial", isDirectory: true)
+        let update = root.appendingPathComponent("update", isDirectory: true)
+        let installRoot = root.appendingPathComponent("installed", isDirectory: true)
+        try writeStdioPlugin(
+            to: initial,
+            id: "dev.ahakey.tests.update",
+            version: "0.1.0"
+        )
+        try writeStdioPlugin(
+            to: update,
+            id: "dev.ahakey.tests.update",
+            version: "0.2.0"
+        )
+
+        let runtime = PluginRuntime(manager: PluginManager(pluginsRoot: installRoot))
+        let initialPreview = try await runtime.previewInstallation(from: initial)
+        try await runtime.install(from: initial, approved: initialPreview)
+        let updatePreview = try await runtime.previewInstallation(from: update)
+        XCTAssertTrue(updatePreview.isUpdate)
+        XCTAssertEqual(updatePreview.installedVersion, "0.1.0")
+        XCTAssertEqual(updatePreview.installedEnabled, true)
+        try await runtime.install(from: update, approved: updatePreview)
+
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.plugins.first?.version, "0.2.0")
+        XCTAssertEqual(snapshot.plugins.first?.loaded, true)
+        XCTAssertFalse(
+            try FileManager.default.contentsOfDirectory(atPath: installRoot.path)
+                .contains(where: { $0.hasPrefix(".backup-") || $0.hasPrefix(".installing-") })
+        )
+        await runtime.stop()
+    }
+
+    func testRuntimeRestoresOldVersionWhenUpdateFails() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let initial = root.appendingPathComponent("initial", isDirectory: true)
+        let update = root.appendingPathComponent("update", isDirectory: true)
+        let installRoot = root.appendingPathComponent("installed", isDirectory: true)
+        try writeStdioPlugin(
+            to: initial,
+            id: "dev.ahakey.tests.rollback",
+            version: "0.1.0"
+        )
+        try FileManager.default.createDirectory(at: update, withIntermediateDirectories: true)
+        try Data("exit 1\n".utf8).write(to: update.appendingPathComponent("plugin.sh"))
+        try writeManifest(
+            to: update,
+            id: "dev.ahakey.tests.rollback",
+            command: "/bin/sh",
+            args: ["${pluginDir}/plugin.sh"],
+            version: "0.2.0"
+        )
+
+        let runtime = PluginRuntime(manager: PluginManager(pluginsRoot: installRoot))
+        let initialPreview = try await runtime.previewInstallation(from: initial)
+        try await runtime.install(from: initial, approved: initialPreview)
+        let updatePreview = try await runtime.previewInstallation(from: update)
+        do {
+            try await runtime.install(from: update, approved: updatePreview)
+            XCTFail("failing update should throw")
+        } catch {
+            XCTAssertFalse(error.localizedDescription.isEmpty)
+        }
+
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.plugins.first?.version, "0.1.0")
+        XCTAssertEqual(snapshot.plugins.first?.loaded, true)
+        let restoredManifest = try PluginManifest.load(
+            from: installRoot.appendingPathComponent("dev.ahakey.tests.rollback")
+        )
+        XCTAssertEqual(restoredManifest.version, "0.1.0")
+        await runtime.stop()
+    }
+
+    func testRuntimeRejectsSameVersionAndDowngrade() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let initial = root.appendingPathComponent("initial", isDirectory: true)
+        let sameVersion = root.appendingPathComponent("same", isDirectory: true)
+        let downgrade = root.appendingPathComponent("downgrade", isDirectory: true)
+        let installRoot = root.appendingPathComponent("installed", isDirectory: true)
+        let pluginID = "dev.ahakey.tests.version-order"
+        try writeStdioPlugin(to: initial, id: pluginID, version: "1.2.0")
+        try writeStdioPlugin(to: sameVersion, id: pluginID, version: "1.2.0")
+        try writeStdioPlugin(to: downgrade, id: pluginID, version: "1.1.9")
+
+        let runtime = PluginRuntime(manager: PluginManager(pluginsRoot: installRoot))
+        let initialPreview = try await runtime.previewInstallation(from: initial)
+        try await runtime.install(from: initial, approved: initialPreview)
+
+        for candidate in [sameVersion, downgrade] {
+            do {
+                _ = try await runtime.previewInstallation(from: candidate)
+                XCTFail("same-version and downgrade packages must be rejected")
+            } catch let error as PluginPackageError {
+                XCTAssertTrue(error.localizedDescription.contains("不是更高版本"))
+            }
+        }
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.plugins.first?.version, "1.2.0")
+        XCTAssertEqual(snapshot.plugins.first?.loaded, true)
+        await runtime.stop()
+    }
+
+    func testRuntimePreservesDisabledStateAcrossUpdate() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let initial = root.appendingPathComponent("initial", isDirectory: true)
+        let update = root.appendingPathComponent("update", isDirectory: true)
+        let installRoot = root.appendingPathComponent("installed", isDirectory: true)
+        let pluginID = "dev.ahakey.tests.disabled-update"
+        try writeStdioPlugin(to: initial, id: pluginID, version: "1.0.0")
+        try writeStdioPlugin(to: update, id: pluginID, version: "1.1.0")
+
+        let runtime = PluginRuntime(manager: PluginManager(pluginsRoot: installRoot))
+        let initialPreview = try await runtime.previewInstallation(from: initial)
+        try await runtime.install(from: initial, approved: initialPreview)
+        await runtime.setEnabled(false, id: pluginID)
+        let updatePreview = try await runtime.previewInstallation(from: update)
+        XCTAssertEqual(updatePreview.installedEnabled, false)
+        try await runtime.install(from: update, approved: updatePreview)
+
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.plugins.first?.version, "1.1.0")
+        XCTAssertEqual(snapshot.plugins.first?.enabled, false)
+        XCTAssertEqual(snapshot.plugins.first?.loaded, false)
+        await runtime.stop()
+    }
+
     func testManagerLoadsAndUnloadsAStdioPlugin() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -278,18 +411,44 @@ final class PluginSystemTests: XCTestCase {
         command: String,
         args: [String] = [],
         permissions: [String] = [],
+        version: String = "0.1.0",
         apiVersion: Int? = nil
     ) throws {
         var manifest: [String: Any] = [
             "id": id,
             "name": "Fixture Plugin",
-            "version": "0.1.0",
+            "version": version,
             "entrypoint": ["command": command, "args": args],
             "permissions": permissions,
         ]
         if let apiVersion { manifest["apiVersion"] = apiVersion }
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted])
         try data.write(to: directory.appendingPathComponent("plugin.json"))
+    }
+
+    private func writeStdioPlugin(to directory: URL, id: String, version: String) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let scriptBody = #"""
+        while IFS= read -r line; do
+          case "$line" in
+            *plugin*initialize*)
+              printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"name":"Fixture","version":"\#(version)","methods":[]}}'
+              ;;
+            *plugin*shutdown*)
+              printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":null}'
+              ;;
+            *plugin*exit*) exit 0 ;;
+          esac
+        done
+        """#
+        try Data(scriptBody.utf8).write(to: directory.appendingPathComponent("plugin.sh"))
+        try writeManifest(
+            to: directory,
+            id: id,
+            command: "/bin/sh",
+            args: ["${pluginDir}/plugin.sh"],
+            version: version
+        )
     }
 
     private func createArchive(of directory: URL, at archive: URL) throws {

@@ -76,6 +76,11 @@ Zip that directory as `.zip`, or rename the ZIP extension to
 from File**. For local development, use **Install from Folder** and select the
 dedicated plugin directory containing `plugin.json`.
 
+If a plugin with the same ID is already installed, a package with a higher
+semantic version is treated as an update. The host preserves the plugin's
+enabled state and restores the previous files and process if the new version
+cannot start. Same-version packages and downgrades are rejected.
+
 Packages are limited to 100 MB compressed, 500 MB expanded, and 10,000 entries.
 They must not contain symbolic links or unsafe archive paths, and exactly one
 `plugin.json` must be present. The current host does not run `npm install`, so
