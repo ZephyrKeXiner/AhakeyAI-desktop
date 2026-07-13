@@ -105,12 +105,45 @@ public actor PluginRuntime {
         notifyChange()
     }
 
-    public func install(from sourceDirectory: URL) async throws {
+    public func install(from sourceURL: URL) async throws {
+        let source = sourceURL.standardizedFileURL
+        let fm = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: source.path, isDirectory: &isDirectory) else {
+            throw PluginPackageError.fileNotFound(source)
+        }
+
+        if isDirectory.boolValue {
+            try await installPluginDirectory(source)
+            return
+        }
+        if source.lastPathComponent.lowercased() == "plugin.json" {
+            try await installPluginDirectory(source.deletingLastPathComponent())
+            return
+        }
+
+        let supportedExtensions = ["zip", "ahakeyplugin"]
+        guard supportedExtensions.contains(source.pathExtension.lowercased()) else {
+            throw PluginPackageError.unsupportedFile(source.lastPathComponent)
+        }
+
+        let temporaryRoot = fm.temporaryDirectory
+            .appendingPathComponent("AhaKeyPluginInstall-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: temporaryRoot) }
+        let pluginDirectory = try PluginPackageArchive.extractPluginDirectory(
+            from: source,
+            to: temporaryRoot
+        )
+        try await installPluginDirectory(pluginDirectory)
+    }
+
+    private func installPluginDirectory(_ sourceDirectory: URL) async throws {
         let source = sourceDirectory.standardizedFileURL
         let manifest = try PluginManifest.load(from: source)
         try manifest.validateRuntime()
 
-        let root = PluginManager.defaultPluginsRoot.standardizedFileURL
+        let managerRoot = await manager.installationRoot()
+        let root = managerRoot.standardizedFileURL
         let target = root.appendingPathComponent(manifest.id, isDirectory: true)
         let fm = FileManager.default
         guard source != target else {
@@ -138,7 +171,8 @@ public actor PluginRuntime {
             throw PluginManifestError.invalid("plugin is not installed: \(id)")
         }
 
-        let root = PluginManager.defaultPluginsRoot.standardizedFileURL
+        let managerRoot = await manager.installationRoot()
+        let root = managerRoot.standardizedFileURL
         let directory = manifest.directory.standardizedFileURL
         let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
         guard directory.path.hasPrefix(rootPrefix), directory.path != root.path else {

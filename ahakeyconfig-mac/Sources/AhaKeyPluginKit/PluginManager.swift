@@ -47,6 +47,10 @@ public actor PluginManager {
             )
     }
 
+    public func installationRoot() -> URL {
+        pluginsRoot
+    }
+
     // MARK: - Discover
 
     /// 扫描 `pluginsRoot` 下所有一级子目录，挑出有 `plugin.json` 的。

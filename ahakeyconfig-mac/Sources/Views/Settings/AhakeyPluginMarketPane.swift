@@ -2,6 +2,7 @@ import AppKit
 import AhaKeyPluginKit
 import Combine
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 插件市场：默认「我的插件」；开源市场为次级入口子页。商店级版式（Hero / 货架 / 产品页）。
 struct AhakeyPluginMarketPane: View {
@@ -184,6 +185,14 @@ struct AhakeyPluginMarketPane: View {
                     .font(AhakeyPluginMarketTheme.sectionTitleFont)
                     .foregroundStyle(AhakeyPluginMarketTheme.primaryText)
                 Spacer(minLength: 0)
+                Button("从文件安装") {
+                    choosePluginFile()
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(AhakeyPluginMarketTheme.accent)
+                .disabled(busyPluginID != nil)
+
                 Button("从文件夹安装") {
                     choosePluginFolder()
                 }
@@ -233,7 +242,7 @@ struct AhakeyPluginMarketPane: View {
                         Text("尚未安装插件")
                             .font(AhakeyPluginMarketTheme.tileTitleFont)
                             .foregroundStyle(AhakeyPluginMarketTheme.primaryText)
-                        Text("从开源市场挑选扩展，或按教程放入本机插件目录。")
+                        Text("点击「从文件安装」选择 .zip、.ahakeyplugin 或 plugin.json。")
                             .font(AhakeyPluginMarketTheme.captionFont)
                             .foregroundStyle(AhakeyPluginMarketTheme.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -287,11 +296,11 @@ struct AhakeyPluginMarketPane: View {
         VStack(alignment: .leading, spacing: 0) {
             guideStep(index: 1, title: "发现开源插件", detail: "从右上角进入「开源市场」挑选已开源的扩展能力。")
             Divider().background(AhakeyPluginMarketTheme.divider)
-            guideStep(index: 2, title: "下载并安装到本机", detail: "安装目录：\(AhakeyPluginMarketCatalog.localInstallPathHint)")
+            guideStep(index: 2, title: "下载并安装到本机", detail: "点击「从文件安装」选择 .zip 或 .ahakeyplugin；开发时也可直接选择文件夹。")
             Divider().background(AhakeyPluginMarketTheme.divider)
             guideStep(index: 3, title: "确认来源可信", detail: "插件是本机子进程，安装前请审核源码与入口命令。")
             Divider().background(AhakeyPluginMarketTheme.divider)
-            guideStep(index: 4, title: "宿主自动扫描加载", detail: "每个插件目录需包含 plugin.json；权限按白名单声明。")
+            guideStep(index: 4, title: "宿主自动扫描加载", detail: "安装包只能包含一个 plugin.json；校验通过后复制、启用并启动。")
         }
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -774,6 +783,23 @@ struct AhakeyPluginMarketPane: View {
     }
 
     @MainActor
+    private func choosePluginFile() {
+        let panel = NSOpenPanel()
+        panel.title = "选择插件安装包"
+        var contentTypes: [UTType] = [.zip, .json]
+        if let pluginPackageType = UTType(filenameExtension: "ahakeyplugin") {
+            contentTypes.append(pluginPackageType)
+        }
+        panel.allowedContentTypes = contentTypes
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let file = panel.url else { return }
+
+        installPlugin(from: file)
+    }
+
+    @MainActor
     private func choosePluginFolder() {
         let panel = NSOpenPanel()
         panel.title = "选择包含 plugin.json 的插件文件夹"
@@ -782,11 +808,16 @@ struct AhakeyPluginMarketPane: View {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let directory = panel.url else { return }
 
+        installPlugin(from: directory)
+    }
+
+    @MainActor
+    private func installPlugin(from source: URL) {
         busyPluginID = "*"
         operationError = nil
         Task {
             do {
-                try await PluginRuntime.shared.install(from: directory)
+                try await PluginRuntime.shared.install(from: source)
             } catch {
                 operationError = error.localizedDescription
             }

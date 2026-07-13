@@ -58,6 +58,30 @@ Only the declared `host/*` permissions can be called by the plugin.
 Installed plugins are trusted local processes, not sandboxed extensions. Review
 their source and entrypoint before installing them into AhaKey Studio.
 
+## Local package distribution
+
+Build the plugin before packaging it, and make sure its `entrypoint` works from
+the packaged directory. A distributable package should have one `plugin.json`
+and all runtime files it needs, for example:
+
+```text
+hello-plugin/
+├── plugin.json
+└── dist/
+    └── main.js
+```
+
+Zip that directory as `.zip`, or rename the ZIP extension to
+`.ahakeyplugin`. Users can install it from **Plugin Market → My Plugins → Install
+from File**. The installer also accepts a directly selected `plugin.json` for
+local development.
+
+Packages are limited to 100 MB compressed, 500 MB expanded, and 10,000 entries.
+They must not contain symbolic links or unsafe archive paths, and exactly one
+`plugin.json` must be present. The current host does not run `npm install`, so
+bundle JavaScript dependencies into `dist/main.js` or ship the required runtime
+files inside the package.
+
 ## Host API
 
 ```ts
