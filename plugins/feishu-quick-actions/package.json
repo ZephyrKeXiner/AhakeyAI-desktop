@@ -1,0 +1,24 @@
+{
+  "name": "@ahakey/feishu-quick-actions-plugin",
+  "version": "0.1.0",
+  "description": "Feishu/Lark quick actions for AhaKey Studio.",
+  "type": "module",
+  "main": "./dist/main.js",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "npm run typecheck && esbuild src/main.ts --bundle --platform=node --format=esm --target=node18 --outfile=dist/main.js",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "package:plugin": "npm test && node scripts/package.mjs"
+  },
+  "dependencies": {
+    "@ahakey/plugin-sdk": "file:../../sdks/typescript"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^6.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

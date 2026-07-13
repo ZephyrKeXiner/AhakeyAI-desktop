@@ -1,0 +1,19 @@
+{
+  "id": "dev.ahakey.feishu-quick-actions",
+  "name": "飞书快捷操作",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "entrypoint": {
+    "command": "node",
+    "args": ["${pluginDir}/dist/main.js"]
+  },
+  "permissions": [
+    "host/getInfo",
+    "host/log",
+    "host/openUrl",
+    "host/openPath",
+    "host/pasteText",
+    "host/registerGlobalHotkey",
+    "host/unregisterGlobalHotkey"
+  ]
+}

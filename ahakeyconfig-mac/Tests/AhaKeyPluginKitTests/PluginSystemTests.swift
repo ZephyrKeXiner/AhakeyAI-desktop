@@ -3,6 +3,64 @@ import XCTest
 @testable import AhaKeyPluginKit
 
 final class PluginSystemTests: XCTestCase {
+    func testExternalPackagePreviewWhenRequested() async throws {
+        guard let packagePath = ProcessInfo.processInfo.environment["AHAKEY_PLUGIN_PACKAGE_UNDER_TEST"],
+              !packagePath.isEmpty else {
+            return
+        }
+        let environment = ProcessInfo.processInfo.environment
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        defer {
+            if let cleanupPath = environment["AHAKEY_PLUGIN_TEST_CLEANUP_PATH"] {
+                let cleanupURL = URL(fileURLWithPath: cleanupPath).standardizedFileURL
+                let temporaryRoot = FileManager.default.temporaryDirectory.standardizedFileURL.path
+                if cleanupURL.path.hasPrefix(temporaryRoot + "/") {
+                    try? FileManager.default.removeItem(at: cleanupURL)
+                }
+            }
+        }
+        let installRoot = root.appendingPathComponent("installed", isDirectory: true)
+        let runtime = PluginRuntime(manager: PluginManager(pluginsRoot: installRoot))
+
+        let preview = try await runtime.previewInstallation(
+            from: URL(fileURLWithPath: packagePath)
+        )
+        XCTAssertEqual(preview.sourceKind, .archive)
+        XCTAssertEqual(preview.packageSHA256?.count, 64)
+        if let expectedID = ProcessInfo.processInfo.environment["AHAKEY_EXPECTED_PLUGIN_ID"] {
+            XCTAssertEqual(preview.pluginID, expectedID)
+        }
+        if environment["AHAKEY_INSTALL_PACKAGE_UNDER_TEST"] == "1" {
+            try await runtime.install(
+                from: URL(fileURLWithPath: packagePath),
+                approved: preview
+            )
+            try await Task.sleep(nanoseconds: 200_000_000)
+            let snapshot = await runtime.snapshot()
+            XCTAssertEqual(snapshot.plugins.first?.id, preview.pluginID)
+            XCTAssertEqual(snapshot.plugins.first?.loaded, true)
+            if let smokeMethod = environment["AHAKEY_PLUGIN_SMOKE_METHOD"] {
+                let result = try await runtime.call(
+                    pluginID: preview.pluginID,
+                    method: smokeMethod
+                )
+                if let expectedCountRaw = environment["AHAKEY_EXPECTED_HOTKEY_COUNT"],
+                   let expectedCount = Int(expectedCountRaw) {
+                    if case .object(let resultObject) = result,
+                       case .array(let hotkeys)? = resultObject["registeredHotkeys"] {
+                        XCTAssertEqual(hotkeys.count, expectedCount)
+                    } else {
+                        XCTFail("external package smoke result did not include registeredHotkeys")
+                    }
+                }
+            }
+            await runtime.stop()
+        } else {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: installRoot.path))
+        }
+    }
+
     func testManifestDefaultsAPIVersionAndMergesExecutablePath() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
