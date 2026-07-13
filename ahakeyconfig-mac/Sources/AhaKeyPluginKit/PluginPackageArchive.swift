@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public enum PluginPackageError: Error, Sendable {
@@ -11,6 +12,7 @@ public enum PluginPackageError: Error, Sendable {
     case symbolicLinkNotAllowed(String)
     case manifestNotFound
     case multipleManifests(Int)
+    case packageChanged
 }
 
 extension PluginPackageError: LocalizedError {
@@ -36,6 +38,8 @@ extension PluginPackageError: LocalizedError {
             return "插件包中没有找到 plugin.json。"
         case .multipleManifests(let count):
             return "插件包中找到 \(count) 个 plugin.json；一个安装包只能包含一个插件。"
+        case .packageChanged:
+            return "插件包在确认后发生了变化，请重新选择并确认。"
         }
     }
 
@@ -48,11 +52,20 @@ extension PluginPackageError: LocalizedError {
 ///
 /// 解包前检查路径穿越，解包后限制文件数量、总大小和符号链接，并要求唯一的 plugin.json。
 enum PluginPackageArchive {
+    struct ExtractedPackage {
+        let directory: URL
+        let sha256: String
+    }
+
     static let maxArchiveBytes = 100 * 1024 * 1024
     static let maxEntryCount = 10_000
     static let maxExpandedBytes: Int64 = 500 * 1024 * 1024
 
-    static func extractPluginDirectory(from archive: URL, to destination: URL) throws -> URL {
+    static func extractPluginDirectory(
+        from archive: URL,
+        to destination: URL,
+        expectedSHA256: String? = nil
+    ) throws -> ExtractedPackage {
         let fm = FileManager.default
         let source = archive.standardizedFileURL
         guard fm.fileExists(atPath: source.path) else {
@@ -78,6 +91,11 @@ enum PluginPackageArchive {
         guard snapshotSize <= maxArchiveBytes else {
             throw PluginPackageError.archiveTooLarge(actual: snapshotSize, max: maxArchiveBytes)
         }
+        let sha256 = try fileSHA256(at: snapshot)
+        if let expectedSHA256,
+           expectedSHA256.caseInsensitiveCompare(sha256) != .orderedSame {
+            throw PluginPackageError.packageChanged
+        }
 
         try preflightArchive(at: snapshot)
 
@@ -88,7 +106,10 @@ enum PluginPackageArchive {
             arguments: ["-x", "-k", snapshot.path, payload.path]
         )
 
-        return try inspectExtractedPackage(at: payload)
+        return ExtractedPackage(
+            directory: try inspectExtractedPackage(at: payload),
+            sha256: sha256
+        )
     }
 
     private static func preflightArchive(at archive: URL) throws {
@@ -228,6 +249,16 @@ enum PluginPackageArchive {
             throw PluginPackageError.multipleManifests(manifests.count)
         }
         return manifests[0].deletingLastPathComponent()
+    }
+
+    private static func fileSHA256(at url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private static func runTool(executable: URL, arguments: [String]) throws -> Data {

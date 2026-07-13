@@ -16,6 +16,7 @@ struct AhakeyPluginMarketPane: View {
     @State private var busyPluginID: String?
     @State private var operationError: String?
     @State private var discoveryErrors: [String] = []
+    @State private var pendingInstall: PluginInstallPreview?
 
     init(section: Binding<AhakeyPluginMarketSection> = .constant(.mine), onClose: @escaping () -> Void) {
         self._section = section
@@ -74,6 +75,16 @@ struct AhakeyPluginMarketPane: View {
             if newValue == .mine {
                 Task { await refreshInstalled() }
             }
+        }
+        .alert(item: $pendingInstall) { preview in
+            Alert(
+                title: Text("安装 \(preview.name)？"),
+                message: Text(installConfirmationMessage(preview)),
+                primaryButton: .destructive(Text("安装并运行")) {
+                    installPlugin(preview)
+                },
+                secondaryButton: .cancel()
+            )
         }
     }
 
@@ -796,7 +807,7 @@ struct AhakeyPluginMarketPane: View {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let file = panel.url else { return }
 
-        installPlugin(from: file)
+        preparePluginInstall(from: file)
     }
 
     @MainActor
@@ -808,22 +819,56 @@ struct AhakeyPluginMarketPane: View {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let directory = panel.url else { return }
 
-        installPlugin(from: directory)
+        preparePluginInstall(from: directory)
     }
 
     @MainActor
-    private func installPlugin(from source: URL) {
+    private func preparePluginInstall(from source: URL) {
         busyPluginID = "*"
         operationError = nil
         Task {
             do {
-                try await PluginRuntime.shared.install(from: source)
+                pendingInstall = try await PluginRuntime.shared.previewInstallation(from: source)
+            } catch {
+                operationError = error.localizedDescription
+            }
+            busyPluginID = nil
+        }
+    }
+
+    @MainActor
+    private func installPlugin(_ preview: PluginInstallPreview) {
+        busyPluginID = "*"
+        operationError = nil
+        Task {
+            do {
+                try await PluginRuntime.shared.install(
+                    from: preview.sourceURL,
+                    approved: preview
+                )
             } catch {
                 operationError = error.localizedDescription
             }
             await refreshInstalled()
             busyPluginID = nil
         }
+    }
+
+    private func installConfirmationMessage(_ preview: PluginInstallPreview) -> String {
+        let source = preview.sourceKind == .archive ? "本地安装包" : "开发文件夹（内容未做哈希锁定）"
+        let permissions = preview.permissions.isEmpty
+            ? "无 Host API 权限"
+            : preview.permissions.joined(separator: "、")
+        let hash = preview.packageSHA256.map { String($0.prefix(16)) + "…" } ?? "无"
+        return """
+        ID：\(preview.pluginID)
+        版本：\(preview.version) · API v\(preview.apiVersion)
+        来源：\(source)
+        权限：\(permissions)
+        SHA-256：\(hash)
+
+        插件会作为未沙箱化的本机子进程运行，可能访问你的文件、网络及其他系统资源。仅安装你信任的来源。
+        """
     }
 
     private func revealSDKExamples() {

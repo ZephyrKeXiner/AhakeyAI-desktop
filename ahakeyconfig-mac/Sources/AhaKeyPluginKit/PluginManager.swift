@@ -51,6 +51,16 @@ public actor PluginManager {
         pluginsRoot
     }
 
+    public static func validateHostPermissions(_ manifest: PluginManifest) throws {
+        let unknownPermissions = Set(manifest.permissions)
+            .subtracting(Set(PluginHost.availableHostMethods))
+        guard unknownPermissions.isEmpty else {
+            throw PluginManifestError.invalid(
+                "unsupported permissions: \(unknownPermissions.sorted().joined(separator: ", "))"
+            )
+        }
+    }
+
     // MARK: - Discover
 
     /// 扫描 `pluginsRoot` 下所有一级子目录，挑出有 `plugin.json` 的。
@@ -124,13 +134,7 @@ public actor PluginManager {
         if loaded[manifest.id] != nil { return } // 幂等
 
         try manifest.validateRuntime()
-        let unknownPermissions = Set(manifest.permissions)
-            .subtracting(Set(PluginHost.availableHostMethods))
-        guard unknownPermissions.isEmpty else {
-            throw PluginManifestError.invalid(
-                "unsupported permissions: \(unknownPermissions.sorted().joined(separator: ", "))"
-            )
-        }
+        try Self.validateHostPermissions(manifest)
 
         let ep = manifest.resolvedEntrypoint
         let client = PluginClient(

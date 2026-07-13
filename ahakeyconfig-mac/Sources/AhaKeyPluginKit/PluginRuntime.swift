@@ -54,6 +54,35 @@ public struct PluginRuntimeSnapshot: Sendable {
     public let discoveryErrors: [String]
 }
 
+public struct PluginInstallPreview: Identifiable, Sendable, Equatable {
+    public enum SourceKind: String, Sendable {
+        case archive
+        case developmentFolder
+    }
+
+    public let sourceURL: URL
+    public let sourceKind: SourceKind
+    public let pluginID: String
+    public let name: String
+    public let version: String
+    public let apiVersion: Int
+    public let permissions: [String]
+    public let packageSHA256: String?
+
+    public var id: String {
+        [sourceURL.path, pluginID, version, packageSHA256 ?? "folder"].joined(separator: "|")
+    }
+
+    fileprivate func matches(_ manifest: PluginManifest, packageSHA256: String?) -> Bool {
+        pluginID == manifest.id
+            && name == manifest.name
+            && version == manifest.version
+            && apiVersion == manifest.apiVersion
+            && permissions == manifest.permissions
+            && self.packageSHA256 == packageSHA256
+    }
+}
+
 /// 正式 App 与插件管理 UI 共享的唯一插件运行时。
 public actor PluginRuntime {
     public static let shared = PluginRuntime()
@@ -105,7 +134,7 @@ public actor PluginRuntime {
         notifyChange()
     }
 
-    public func install(from sourceURL: URL) async throws {
+    public func previewInstallation(from sourceURL: URL) async throws -> PluginInstallPreview {
         let source = sourceURL.standardizedFileURL
         let fm = FileManager.default
         var isDirectory: ObjCBool = false
@@ -114,8 +143,19 @@ public actor PluginRuntime {
         }
 
         if isDirectory.boolValue {
-            try await installPluginDirectory(source)
-            return
+            let manifest = try PluginManifest.load(from: source)
+            try manifest.validateRuntime()
+            try PluginManager.validateHostPermissions(manifest)
+            return PluginInstallPreview(
+                sourceURL: source,
+                sourceKind: .developmentFolder,
+                pluginID: manifest.id,
+                name: manifest.name,
+                version: manifest.version,
+                apiVersion: manifest.apiVersion,
+                permissions: manifest.permissions,
+                packageSHA256: nil
+            )
         }
         let supportedExtensions = ["zip", "ahakeyplugin"]
         guard supportedExtensions.contains(source.pathExtension.lowercased()) else {
@@ -123,19 +163,84 @@ public actor PluginRuntime {
         }
 
         let temporaryRoot = fm.temporaryDirectory
-            .appendingPathComponent("AhaKeyPluginInstall-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("AhaKeyPluginPreview-\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: temporaryRoot) }
-        let pluginDirectory = try PluginPackageArchive.extractPluginDirectory(
+        let extracted = try PluginPackageArchive.extractPluginDirectory(
             from: source,
             to: temporaryRoot
         )
-        try await installPluginDirectory(pluginDirectory)
+        let manifest = try PluginManifest.load(from: extracted.directory)
+        try manifest.validateRuntime()
+        try PluginManager.validateHostPermissions(manifest)
+        return PluginInstallPreview(
+            sourceURL: source,
+            sourceKind: .archive,
+            pluginID: manifest.id,
+            name: manifest.name,
+            version: manifest.version,
+            apiVersion: manifest.apiVersion,
+            permissions: manifest.permissions,
+            packageSHA256: extracted.sha256
+        )
     }
 
-    private func installPluginDirectory(_ sourceDirectory: URL) async throws {
+    public func install(from sourceURL: URL, approved preview: PluginInstallPreview) async throws {
+        let source = sourceURL.standardizedFileURL
+        guard source == preview.sourceURL.standardizedFileURL else {
+            throw PluginPackageError.packageChanged
+        }
+
+        let fm = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: source.path, isDirectory: &isDirectory) else {
+            throw PluginPackageError.fileNotFound(source)
+        }
+        if isDirectory.boolValue {
+            guard preview.sourceKind == .developmentFolder else {
+                throw PluginPackageError.packageChanged
+            }
+            try await installPluginDirectory(
+                source,
+                approved: preview,
+                packageSHA256: nil
+            )
+            return
+        }
+
+        guard preview.sourceKind == .archive, let expectedSHA256 = preview.packageSHA256 else {
+            throw PluginPackageError.packageChanged
+        }
+        let supportedExtensions = ["zip", "ahakeyplugin"]
+        guard supportedExtensions.contains(source.pathExtension.lowercased()) else {
+            throw PluginPackageError.unsupportedFile(source.lastPathComponent)
+        }
+        let temporaryRoot = fm.temporaryDirectory
+            .appendingPathComponent("AhaKeyPluginInstall-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: temporaryRoot) }
+        let extracted = try PluginPackageArchive.extractPluginDirectory(
+            from: source,
+            to: temporaryRoot,
+            expectedSHA256: expectedSHA256
+        )
+        try await installPluginDirectory(
+            extracted.directory,
+            approved: preview,
+            packageSHA256: extracted.sha256
+        )
+    }
+
+    private func installPluginDirectory(
+        _ sourceDirectory: URL,
+        approved preview: PluginInstallPreview,
+        packageSHA256: String?
+    ) async throws {
         let source = sourceDirectory.standardizedFileURL
         let manifest = try PluginManifest.load(from: source)
         try manifest.validateRuntime()
+        try PluginManager.validateHostPermissions(manifest)
+        guard preview.matches(manifest, packageSHA256: packageSHA256) else {
+            throw PluginPackageError.packageChanged
+        }
 
         let managerRoot = await manager.installationRoot()
         let root = managerRoot.standardizedFileURL

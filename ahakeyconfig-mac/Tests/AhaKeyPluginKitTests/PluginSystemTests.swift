@@ -105,7 +105,10 @@ final class PluginSystemTests: XCTestCase {
 
         let runtime = PluginRuntime(manager: PluginManager(pluginsRoot: installRoot))
         do {
-            try await runtime.install(from: archive)
+            let preview = try await runtime.previewInstallation(from: archive)
+            XCTAssertEqual(preview.pluginID, "dev.ahakey.tests.archive")
+            XCTAssertEqual(preview.packageSHA256?.count, 64)
+            try await runtime.install(from: archive, approved: preview)
             let snapshot = await runtime.snapshot()
             XCTAssertEqual(snapshot.plugins.map(\.id), ["dev.ahakey.tests.archive"])
             XCTAssertEqual(snapshot.plugins.first?.loaded, true)
@@ -134,10 +137,38 @@ final class PluginSystemTests: XCTestCase {
 
         let runtime = PluginRuntime(manager: PluginManager(pluginsRoot: installRoot))
         do {
-            try await runtime.install(from: package.appendingPathComponent("plugin.json"))
+            _ = try await runtime.previewInstallation(
+                from: package.appendingPathComponent("plugin.json")
+            )
             XCTFail("direct plugin.json installation should be rejected")
         } catch is PluginPackageError {
             // Expected.
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: installRoot.path))
+    }
+
+    func testRuntimeRejectsArchiveChangedAfterApproval() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let package = root.appendingPathComponent("package", isDirectory: true)
+        let installRoot = root.appendingPathComponent("installed", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        try writeManifest(to: package, id: "dev.ahakey.tests.changed", command: "/bin/sh")
+        let archive = root.appendingPathComponent("changed.ahakeyplugin")
+        try createArchive(of: package, at: archive)
+
+        let runtime = PluginRuntime(manager: PluginManager(pluginsRoot: installRoot))
+        let preview = try await runtime.previewInstallation(from: archive)
+        let handle = try FileHandle(forWritingTo: archive)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("changed".utf8))
+        try handle.close()
+
+        do {
+            try await runtime.install(from: archive, approved: preview)
+            XCTFail("changed archive should require a new approval")
+        } catch let error as PluginPackageError {
+            XCTAssertEqual(error.localizedDescription, PluginPackageError.packageChanged.localizedDescription)
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: installRoot.path))
     }
@@ -151,24 +182,26 @@ final class PluginSystemTests: XCTestCase {
         try writeManifest(
             to: package,
             id: "dev.ahakey.tests.load-failure",
-            command: "/bin/sh",
-            permissions: ["host/notReal"]
+            command: "/bin/false"
         )
 
         let runtime = PluginRuntime(manager: PluginManager(pluginsRoot: installRoot))
         do {
-            try await runtime.install(from: package)
-            XCTFail("a plugin with unsupported permissions should fail installation")
+            let preview = try await runtime.previewInstallation(from: package)
+            try await runtime.install(from: package, approved: preview)
+            XCTFail("a plugin that exits during startup should fail installation")
         } catch {
-            XCTAssertTrue(error.localizedDescription.contains("unsupported permissions"))
+            XCTAssertFalse(error.localizedDescription.isEmpty)
         }
         XCTAssertFalse(
             FileManager.default.fileExists(
                 atPath: installRoot.appendingPathComponent("dev.ahakey.tests.load-failure").path
             )
         )
-        let installEntries = try FileManager.default.contentsOfDirectory(atPath: installRoot.path)
-        XCTAssertTrue(installEntries.isEmpty, "failed install must not leave a staging directory")
+        if FileManager.default.fileExists(atPath: installRoot.path) {
+            let installEntries = try FileManager.default.contentsOfDirectory(atPath: installRoot.path)
+            XCTAssertTrue(installEntries.isEmpty, "failed install must not leave a staging directory")
+        }
         let snapshot = await runtime.snapshot()
         XCTAssertTrue(snapshot.plugins.isEmpty)
     }
