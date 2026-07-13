@@ -32,11 +32,23 @@ enum DefaultOLEDAssets {
         Bundle.main.url(forResource: name, withExtension: "gif", subdirectory: subdirectory)?.path
     }
 
-    /// 判断一个 localAssetPath 是否指向某个 bundle 内置素材。
-    /// 迁移逻辑用：当用户的草稿引用已失效的 bundle 路径（比如换 app 位置、换 mode）时可以安全重写。
+    /// 判断一个 localAssetPath 是否指向当前或历史 app bundle 的内置素材。
+    /// 迁移逻辑用：当用户的草稿引用旧构建目录、旧安装位置或旧文件名时，可以安全重写。
     static func isBundledPath(_ path: String) -> Bool {
-        guard let resourcesURL = Bundle.main.resourceURL else { return false }
-        let resourcesPath = resourcesURL.appendingPathComponent(subdirectory).path
-        return path.hasPrefix(resourcesPath + "/")
+        let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+
+        if let resourcesURL = Bundle.main.resourceURL {
+            let currentResourcesPath = resourcesURL
+                .appendingPathComponent(subdirectory, isDirectory: true)
+                .standardizedFileURL.path
+            if normalizedPath.hasPrefix(currentResourcesPath + "/") {
+                return true
+            }
+        }
+
+        // 旧版本会把 bundle 内资源的绝对路径写进 UserDefaults。应用换目录或重新安装后，
+        // 该路径不再位于 Bundle.main 下，但目录结构仍能可靠地区分内置素材与普通外部 GIF。
+        let historicalBundleMarker = ".app/Contents/Resources/\(subdirectory)/"
+        return normalizedPath.contains(historicalBundleMarker)
     }
 }

@@ -1107,7 +1107,11 @@ enum AhaKeyStudioStore {
         for slot in AhaKeyModeSlot.allCases where !existingSlots.contains(slot) {
             draft.modes.append(AhaKeyModeDraft.default(for: slot))
         }
-        return migratedDraft(from: draft)
+        let migrated = migratedDraft(from: draft)
+        if migrated != draft {
+            save(migrated)
+        }
+        return migrated
     }
 
     static func save(_ draft: AhaKeyStudioDraft) {
